@@ -173,7 +173,7 @@ test("new proposals never replace an operator's prepared preview implicitly", as
   assert.ok(dialog.find("redmine-comment-approve"));
 });
 
-async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSection") {
+async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSection", watches = []) {
   const { makeSettingsComponent } = await loadBundleTestHooks();
   const calls = [];
   let cursor = 0;
@@ -197,6 +197,11 @@ async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSectio
       if (key === "replies.settings.save") return context.body;
       if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], live_statuses: [{ id: 1, name: "New" }, { id: 3, name: "Working" }], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
       if (key === "fieldmapping.save") return { saved: true };
+      if (key === "watches.list") return { watches };
+      if (key === "projects.list") return { selected_ids: [9], projects: [{ id: 9, name: "Customer project" }] };
+      if (key === "watches.repositories") return { repositories: [{ id: "repo-id", name: "team/application", default_branch: "develop" }] };
+      if (key === "watches.create" || key === "watches.update") return context.body;
+      if (key === "watches.filter_options") return { filters: [] };
       throw new Error(`unexpected action ${key}`);
     } },
   };
@@ -297,23 +302,50 @@ test("tracker status maps remain independent and clear foreign steps on workflow
   assert.equal(form.find("redmine-route-status-step-0-0").children[0].props.placeholder, "Choose workflow step");
 });
 
-test("selective diagnostic claim requires explicit open statuses and can be disabled independently", async () => {
+test("selective workflow intake requires explicit open statuses and can be disabled independently", async () => {
   const form = await replySettingsForm(undefined, "FieldMappingSection");
   form.find("redmine-route-add").props.onClick();
   form.select("redmine-route-tracker-0", "8");
   form.select("redmine-route-workflow-0", "workflow-bug");
   form.select("redmine-route-step-0", "diagnosis");
-  assert.equal(form.find("redmine-route-diagnosis-0").props.checked, false);
-  form.find("redmine-route-diagnosis-0").props.onCheckedChange(true);
+  assert.equal(form.find("redmine-route-intake-0").props.checked, false);
+  form.find("redmine-route-intake-0").props.onCheckedChange(true);
   await assert.rejects(form.find("redmine-fieldmapping-save").props.onClick(), /distinct source and working statuses/);
-  form.select("redmine-route-diagnosis-from-0", "1");
-  form.select("redmine-route-diagnosis-working-0", "3");
+  form.select("redmine-route-intake-from-0", "1");
+  form.select("redmine-route-intake-working-0", "3");
   await form.find("redmine-fieldmapping-save").props.onClick();
-  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes[0].diagnosis, { from_status_id: 1, working_status_id: 3 });
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes[0].automatic_intake, { from_status_id: 1, working_status_id: 3 });
   assert.equal(form.calls.some(call => call.key === "syncoptions.save" || call.key === "replies.settings.save"), false);
-  form.find("redmine-route-diagnosis-0").props.onCheckedChange(false);
+  form.find("redmine-route-intake-0").props.onCheckedChange(false);
   await form.find("redmine-fieldmapping-save").props.onClick();
-  assert.equal(form.calls.at(-1).context.body.tracker_routes[0].diagnosis, undefined);
+  assert.equal(form.calls.at(-1).context.body.tracker_routes[0].automatic_intake, undefined);
+});
+
+test("editing watcher execution preserves its identity, filters and existing tasks", async () => {
+  const savedWatch = { id: "watch-id", project_id: 9, max_inflight_tasks: 0, enabled: true, assignee_id: 7, filters: [{ field: "tracker_id", operator: "=", value: "8" }] };
+  const form = await replySettingsForm(undefined, "WatchersSection", [savedWatch]);
+  form.find("redmine-watch-edit-watch-id").props.onClick();
+  assert.ok(form.find("redmine-watch-editing"));
+  form.find("redmine-watch-max-inflight").props.onChange({ target: { value: "2" } });
+  form.select("redmine-watch-repository", "repo-id");
+  form.find("redmine-watch-base-branch").props.onChange({ target: { value: "release/example" } });
+  await form.find("redmine-watch-create").props.onClick();
+  const write = form.calls.find(call => call.key === "watches.update");
+  assert.deepEqual(write.context.body, { ...savedWatch, max_inflight_tasks: 2, repository_id: "repo-id", base_branch: "release/example" });
+  assert.equal(form.calls.some(call => call.key === "watches.delete" || call.key === "watches.create"), false);
+});
+
+test("new watcher attaches a workspace repository and leaves default branch resolution to Kandev", async () => {
+  const form = await replySettingsForm(undefined, "WatchersSection");
+  form.select("redmine-watch-project", "9");
+  form.select("redmine-watch-repository", "repo-id");
+  form.find("redmine-watch-max-inflight").props.onChange({ target: { value: "1" } });
+  await form.find("redmine-watch-create").props.onClick();
+  const write = form.calls.find(call => call.key === "watches.create");
+  assert.equal(write.context.body.repository_id, "repo-id");
+  assert.equal(write.context.body.base_branch, "");
+  assert.equal(write.context.body.max_inflight_tasks, 1);
+  assert.equal(write.context.body.enabled, true);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

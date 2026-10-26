@@ -52,11 +52,14 @@ automatic publication of new, verified draft responses.
   write-back (`autoStatusWriteback`, `syncTitleDescription`) and echo
   suppression so a write-back round trip never bounces the task. Each tracker
   route can have its own status map, independent of the default workflow.
-- **Automatic diagnosis** — an opt-in tracker rule imports source-status issues
+- **Automatic workflow intake** — an opt-in tracker rule imports source-status issues
   assigned to the token's actual user, starts the configured entry agent and
   claims only the working status after launch is verified. Global status
-  write-back and automatic customer replies can remain off. Configure a
-  read-only native profile; the plugin preserves its existing permissions.
+  write-back and automatic customer replies can remain off. The chosen workflow
+  defines the job: diagnosis, planning, implementation or another configured
+  process. A fixed profile and a positive watch capacity are required. Watchers
+  can attach an existing workspace repository and optional base branch; execution
+  settings can be edited without recreating the watch or its tasks.
 - **Composer `#` mentions** — resolves Redmine issues through
   `reference_sources` with submit-time reauthorization.
 - **Issue watchers** — one kandev task per newly matching issue, deduplicated

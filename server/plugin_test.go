@@ -28,17 +28,25 @@ import (
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
 
-	mu             sync.Mutex
-	state          map[string]map[string]any
-	secrets        map[string]string
-	updates        []pluginsdk.UpdateTaskInput
-	tasks          map[string]*pluginsdk.Task
-	nextID         int
-	workflowReader pluginsdk.WorkflowReader
+	mu               sync.Mutex
+	state            map[string]map[string]any
+	secrets          map[string]string
+	updates          []pluginsdk.UpdateTaskInput
+	tasks            map[string]*pluginsdk.Task
+	nextID           int
+	workflowReader   pluginsdk.WorkflowReader
+	repositoryReader pluginsdk.RepositoryReader
 }
 
 func newFakeHost() *fakeHost {
 	return &fakeHost{state: make(map[string]map[string]any), secrets: make(map[string]string), tasks: make(map[string]*pluginsdk.Task)}
+}
+
+func (h *fakeHost) Repositories() pluginsdk.RepositoryReader {
+	if h.repositoryReader != nil {
+		return h.repositoryReader
+	}
+	return h.UnimplementedHostData.Repositories()
 }
 
 func TestConfiguredSyncPollInterval(t *testing.T) {

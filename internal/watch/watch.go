@@ -34,6 +34,7 @@ import (
 // by construction rather than by convention.
 const metadataKeyWatchID = "redmine_watch_id"
 const metadataKeyIssueID = "redmine_issue_id"
+const metadataKeyAutomaticIntake = "automatic_intake"
 const pluginMetadataKey = "plugin:kandev-plugin-redmine"
 const maxTaskTitleRunes = 60
 
@@ -49,6 +50,8 @@ type Watch struct {
 	WorkflowID     string
 	WorkflowStepID string
 	ProjectID      int
+	RepositoryID   string
+	BaseBranch     string
 	TrackerID      *int
 	StatusID       *int
 	PriorityID     *int
@@ -281,10 +284,11 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 	}
 
 	var failures []error
+	autoStarts := 0
 	tokenUserID := 0
 	var tokenUserErr error
 	for _, route := range w.TrackerRoutes {
-		if route.Diagnosis != nil {
+		if route.AutomaticIntake != nil {
 			tokenUserID, tokenUserErr = issuesSvc.TokenUserID(ctx)
 			if tokenUserErr != nil {
 				failures = append(failures, tokenUserErr)
@@ -309,7 +313,7 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 		if tokenUserErr != nil {
 			continue
 		}
-		if err := s.claimDiagnosis(ctx, w, taskID, tokenUserID, issuesSvc); err != nil {
+		if err := s.claimIntake(ctx, w, taskID, tokenUserID, issuesSvc); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -338,7 +342,7 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 					continue // leave unseen: retry once a slot frees up
 				}
 			}
-			if err := s.createTask(ctx, w, issue, tokenUserID, issuesSvc); err != nil {
+			if err := s.createTask(ctx, w, issue, tokenUserID, issuesSvc, &autoStarts); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -362,7 +366,7 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 	return false, nil
 }
 
-func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, tokenUserID int, issuesSvc *issues.Service) error {
+func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, tokenUserID int, issuesSvc *issues.Service, autoStarts *int) error {
 	if _, found, err := s.host.GetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID)); err != nil {
 		return err
 	} else if found {
@@ -372,30 +376,30 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 		return err
 	}
 	var statuses []fieldmapping.StatusMapping
-	var diagnosis *diagnosticClaim
+	var intake *intakeClaim
 	routed := false
 	for _, route := range w.TrackerRoutes {
 		if route.RedmineTrackerID == issue.TrackerID {
 			w.WorkflowID, w.WorkflowStepID = route.WorkflowID, route.WorkflowStepID
 			statuses = route.Statuses
 			routed = true
-			if route.Diagnosis != nil {
-				entry, err := route.DiagnosticEntry(w.EntrySteps[route.WorkflowID])
+			if route.AutomaticIntake != nil {
+				entry, err := route.IntakeEntry(w.EntrySteps[route.WorkflowID])
 				if err != nil {
 					return err
 				}
-				if tokenUserID <= 0 || issue.StatusID != route.Diagnosis.FromStatusID || issue.AssigneeID != tokenUserID {
+				if tokenUserID <= 0 || issue.StatusID != route.AutomaticIntake.FromStatusID || issue.AssigneeID != tokenUserID {
 					return nil
 				}
 				current, err := issuesSvc.GetIssue(ctx, issue.ID)
 				if err != nil {
 					return err
 				}
-				if current.ProjectID != w.ProjectID || current.TrackerID != route.RedmineTrackerID || current.StatusID != route.Diagnosis.FromStatusID || current.AssigneeID != tokenUserID || !w.matches(*current) {
+				if current.ProjectID != w.ProjectID || current.TrackerID != route.RedmineTrackerID || current.StatusID != route.AutomaticIntake.FromStatusID || current.AssigneeID != tokenUserID || !w.matches(*current) {
 					return nil
 				}
 				issue = *current
-				diagnosis = &diagnosticClaim{State: "pending", IssueID: issue.ID, ProjectID: issue.ProjectID, TrackerID: issue.TrackerID, TokenUserID: tokenUserID, WorkflowID: route.WorkflowID, StepID: route.WorkflowStepID, ProfileID: entry.AgentProfileID, FromStatusID: route.Diagnosis.FromStatusID, WorkingStatusID: route.Diagnosis.WorkingStatusID}
+				intake = &intakeClaim{State: "pending", IssueID: issue.ID, ProjectID: issue.ProjectID, TrackerID: issue.TrackerID, TokenUserID: tokenUserID, WorkflowID: route.WorkflowID, StepID: route.WorkflowStepID, ProfileID: entry.AgentProfileID, FromStatusID: route.AutomaticIntake.FromStatusID, WorkingStatusID: route.AutomaticIntake.WorkingStatusID}
 			}
 			break
 		}
@@ -404,6 +408,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 		w.WorkflowStepID = step
 	}
 	startAgent := false
+	entryProfileID := ""
 	for _, step := range w.EntrySteps[w.WorkflowID] {
 		if step.ID != w.WorkflowStepID && !(w.WorkflowStepID == "" && step.IsStartStep) {
 			continue
@@ -414,21 +419,45 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 		for _, action := range step.OnEnterActionTypes {
 			startAgent = startAgent || action == "auto_start_agent"
 		}
+		entryProfileID = step.AgentProfileID
 	}
 	if startAgent {
+		if w.MaxInflightTasks <= 0 {
+			return fmt.Errorf("watch: automatic workflow starts require a positive max_inflight_tasks limit")
+		}
+		if entryProfileID == "" {
+			return fmt.Errorf("watch: automatic workflow starts require a fixed entry agent profile")
+		}
+		if *autoStarts >= w.MaxInflightTasks {
+			return nil
+		}
+		*autoStarts += 1 // Failed launches consume this poll's budget too.
 		if err := s.host.SetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID), map[string]any{"state": "creating", "issue_id": issue.ID, "watch_id": w.ID}); err != nil {
 			return err
 		}
 	}
 	var launch *pluginsdk.PluginTaskLaunchOptions
-	if diagnosis != nil {
-		launch = &pluginsdk.PluginTaskLaunchOptions{AgentProfileID: &diagnosis.ProfileID}
+	if startAgent {
+		launch = &pluginsdk.PluginTaskLaunchOptions{AgentProfileID: &entryProfileID}
+	}
+	var repositories []pluginsdk.PluginTaskRepository
+	if w.RepositoryID != "" {
+		repository := pluginsdk.PluginTaskRepository{RepositoryID: w.RepositoryID}
+		if w.BaseBranch != "" {
+			repository.BaseBranch = &w.BaseBranch
+		}
+		repositories = []pluginsdk.PluginTaskRepository{repository}
+	}
+	metadata := map[string]any{metadataKeyWatchID: w.ID, metadataKeyIssueID: issue.ID}
+	if intake != nil {
+		metadata[metadataKeyAutomaticIntake] = map[string]any{"token_user_id": tokenUserID, "from_status_id": intake.FromStatusID, "working_status_id": intake.WorkingStatusID, "workflow_id": intake.WorkflowID, "entry_step_id": intake.StepID, "profile_id": intake.ProfileID, "repository_id": w.RepositoryID}
 	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
-		WorkspaceID: w.WorkspaceID,
-		WorkflowID:  w.WorkflowID,
-		StartAgent:  startAgent,
-		Launch:      launch,
+		WorkspaceID:  w.WorkspaceID,
+		WorkflowID:   w.WorkflowID,
+		StartAgent:   startAgent,
+		Launch:       launch,
+		Repositories: repositories,
 		WorkflowStepID: func() *string {
 			if w.WorkflowStepID == "" {
 				return nil
@@ -439,10 +468,7 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
 		Priority:    w.PriorityMappings[issue.PriorityID],
-		Metadata: map[string]any{
-			metadataKeyWatchID: w.ID,
-			metadataKeyIssueID: issue.ID,
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		if startAgent && (status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.Unimplemented) {
@@ -469,8 +495,8 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 			return retain(err)
 		}
 	}
-	if diagnosis != nil {
-		if err := s.saveDiagnosticClaim(ctx, task.ID, *diagnosis); err != nil {
+	if intake != nil {
+		if err := s.saveIntakeClaim(ctx, task.ID, *intake); err != nil {
 			return retain(err)
 		}
 	}
@@ -734,6 +760,8 @@ func (w Watch) toMap() map[string]any {
 		"workflow_id":        w.WorkflowID,
 		"workflow_step_id":   w.WorkflowStepID,
 		"project_id":         w.ProjectID,
+		"repository_id":      w.RepositoryID,
+		"base_branch":        w.BaseBranch,
 		"max_inflight_tasks": w.MaxInflightTasks,
 		"enabled":            w.Enabled,
 	}
@@ -770,6 +798,8 @@ func (w Watch) toMap() map[string]any {
 
 func watchFromMap(workspaceID string, m map[string]any) Watch {
 	w := Watch{WorkspaceID: workspaceID}
+	w.RepositoryID, _ = m["repository_id"].(string)
+	w.BaseBranch, _ = m["base_branch"].(string)
 	if v, ok := m["id"].(string); ok {
 		w.ID = v
 	}

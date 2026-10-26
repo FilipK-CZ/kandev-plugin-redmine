@@ -43,6 +43,7 @@ runtime:
 #              and communication steps pick real workspace-owned step IDs.
 #              messages: drafting and preview discovery. sessions/interactions:
 #              read-only completion checks before opt-in automatic publication.
+#              repositories: names and default branches for watcher task bindings.
 #   api_write: ["tasks"] - creating watcher tasks and updating already-linked
 #              tasks during sync/write-back. Task linking itself is
 #              plugin-owned state (Tasks().Update has no metadata field to
@@ -60,7 +61,7 @@ runtime:
 capabilities:
   state: true
   secrets: true
-  api_read: ["tasks", "workflows", "messages", "sessions", "interactions"]
+  api_read: ["tasks", "workflows", "messages", "sessions", "interactions", "repositories"]
   api_write: ["tasks", "messages"]
   events: ["task.moved", "task.deleted", "workspace.deleted"]
 
@@ -99,6 +100,7 @@ actions:
   - { key: "link.set_status", scope: "task", max_body_bytes: 8192 }
   - { key: "watches.list", scope: "workspace", max_body_bytes: 8192 }
   - { key: "watches.filter_options", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "watches.repositories", scope: "workspace", max_body_bytes: 8192 }
   - { key: "watches.create", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.update", scope: "workspace", max_body_bytes: 32768 }
   - { key: "watches.delete", scope: "workspace", max_body_bytes: 8192 }

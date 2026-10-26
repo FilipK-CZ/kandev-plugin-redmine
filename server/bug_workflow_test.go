@@ -151,7 +151,7 @@ func TestTrackerRouteValidationUsesLiveTrackerAndConfiguredEntry(t *testing.T) {
 	require.ErrorContains(t, p.validateTrackerRoutes(context.Background(), "ws-1", client, []fieldmapping.TrackerRoute{valid}), "selected workflow")
 }
 
-func TestDiagnosticPolicyUsesLiveOpenStatusesAndMapsRemainTrackerScoped(t *testing.T) {
+func TestAutomaticIntakePolicyUsesLiveOpenStatusesAndMapsRemainTrackerScoped(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -165,11 +165,11 @@ func TestDiagnosticPolicyUsesLiveOpenStatusesAndMapsRemainTrackerScoped(t *testi
 	}))
 	defer srv.Close()
 	client := redmineclient.New(srv.URL, "key", srv.Client())
-	mapping := fieldmapping.Mapping{Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "backlog"}}, TrackerRoutes: []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis", Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "diagnosis"}}, Diagnosis: &fieldmapping.DiagnosticPolicy{FromStatusID: 1, WorkingStatusID: 3}}}}
+	mapping := fieldmapping.Mapping{Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "backlog"}}, TrackerRoutes: []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis", Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "diagnosis"}}, AutomaticIntake: &fieldmapping.AutomaticIntakePolicy{FromStatusID: 1, WorkingStatusID: 3}}}}
 	require.NoError(t, p.normalizeAndValidateMapping(context.Background(), client, &mapping))
 	require.Equal(t, "New", mapping.TrackerRoutes[0].Statuses[0].RedmineName)
 	for _, invalid := range []int{0, 5, 999} {
-		mapping.TrackerRoutes[0].Diagnosis.WorkingStatusID = invalid
+		mapping.TrackerRoutes[0].AutomaticIntake.WorkingStatusID = invalid
 		require.ErrorContains(t, p.normalizeAndValidateMapping(context.Background(), client, &mapping), "live open statuses")
 	}
 }

@@ -16,21 +16,21 @@ import (
 	"kandev-plugin-redmine/internal/issues"
 )
 
-type diagnosticFixture struct {
+type intakeFixture struct {
 	mu                           sync.Mutex
 	status, assignee, user, puts int
 	failPUT, applyFailedPUT      bool
 }
 
-func newDiagnosticFixture(t *testing.T) (*Service, *fakeHost, Watch, *issues.Service, *diagnosticFixture) {
+func newIntakeFixture(t *testing.T) (*Service, *fakeHost, Watch, *issues.Service, *intakeFixture) {
 	t.Helper()
 	host := newFakeHost()
 	svc := newWatchService(host)
-	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", WorkflowID: "default", ProjectID: 9, Enabled: true})
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", WorkflowID: "default", ProjectID: 9, MaxInflightTasks: 2, Enabled: true})
 	require.NoError(t, err)
-	w.TrackerRoutes = []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis", Diagnosis: &fieldmapping.DiagnosticPolicy{FromStatusID: 1, WorkingStatusID: 3}}}
-	w.EntrySteps = map[string][]pluginsdk.WorkflowStep{"bugs": {{ID: "diagnosis", IsStartStep: true, AgentProfileID: "readonly", OnEnterActionTypes: []string{"auto_start_agent"}}}}
-	f := &diagnosticFixture{status: 1, assignee: 7, user: 7}
+	w.TrackerRoutes = []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "intake", AutomaticIntake: &fieldmapping.AutomaticIntakePolicy{FromStatusID: 1, WorkingStatusID: 3}}}
+	w.EntrySteps = map[string][]pluginsdk.WorkflowStep{"bugs": {{ID: "intake", IsStartStep: true, AgentProfileID: "readonly", OnEnterActionTypes: []string{"auto_start_agent"}}}}
+	f := &intakeFixture{status: 1, assignee: 7, user: 7}
 	issuesSvc := newIssuesService(t, func(out http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -60,12 +60,12 @@ func newDiagnosticFixture(t *testing.T) (*Service, *fakeHost, Watch, *issues.Ser
 	return svc, host, w, issuesSvc, f
 }
 
-func startedDiagnosis(host *fakeHost, state string) {
-	host.sessions = []pluginsdk.Session{{ID: "diagnostic-session", TaskID: "task-1", AgentProfileID: "readonly", ACPSessionID: "acp-session", State: state, StartedAt: "2026-10-26T20:00:00Z"}}
+func startedEntry(host *fakeHost, state string) {
+	host.sessions = []pluginsdk.Session{{ID: "intake-session", TaskID: "task-1", AgentProfileID: "readonly", ACPSessionID: "acp-session", State: state, StartedAt: "2026-10-26T20:00:00Z"}}
 }
 
-func TestDiagnosticClaimWaitsForRealLaunchAndWritesOnlyOnce(t *testing.T) {
-	svc, host, w, issuesSvc, f := newDiagnosticFixture(t)
+func TestAutomaticIntakeClaimWaitsForRealLaunchAndWritesOnlyOnce(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
 	ctx := context.Background()
 	require.NoError(t, svc.Poll(ctx, w, issuesSvc))
 	require.Len(t, host.creates, 1)
@@ -73,15 +73,15 @@ func TestDiagnosticClaimWaitsForRealLaunchAndWritesOnlyOnce(t *testing.T) {
 	require.Equal(t, "readonly", *host.creates[0].Launch.AgentProfileID)
 	require.NoError(t, svc.Poll(ctx, w, issuesSvc))
 	require.Zero(t, f.puts, "best-effort create alone must not claim the issue")
-	startedDiagnosis(host, "STARTING")
+	startedEntry(host, "STARTING")
 	require.NoError(t, svc.Poll(ctx, w, issuesSvc))
 	require.Zero(t, f.puts)
-	startedDiagnosis(host, "RUNNING")
+	startedEntry(host, "RUNNING")
 	require.NoError(t, svc.Poll(ctx, w, issuesSvc))
 	require.NoError(t, svc.Poll(ctx, w, issuesSvc))
 	require.Equal(t, 1, f.puts)
 	require.Len(t, host.creates, 1)
-	claim, _, err := host.GetState(ctx, "task", "task-1", diagnosticClaimKey)
+	claim, _, err := host.GetState(ctx, "task", "task-1", intakeClaimKey)
 	require.NoError(t, err)
 	require.Equal(t, "complete", claim["state"])
 	link, _, err := svc.tasklinks.Get(ctx, "task-1")
@@ -89,8 +89,8 @@ func TestDiagnosticClaimWaitsForRealLaunchAndWritesOnlyOnce(t *testing.T) {
 	require.Equal(t, 3, link.ObservedStatusID)
 }
 
-func TestDiagnosticPolicyLeavesIneligibleIssuesUnseenUntilAssignment(t *testing.T) {
-	svc, host, w, issuesSvc, f := newDiagnosticFixture(t)
+func TestAutomaticIntakePolicyLeavesIneligibleIssuesUnseenUntilAssignment(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
 	f.assignee = 99
 	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
 	require.Empty(t, host.creates)
@@ -102,12 +102,12 @@ func TestDiagnosticPolicyLeavesIneligibleIssuesUnseenUntilAssignment(t *testing.
 	require.Len(t, host.creates, 1)
 }
 
-func TestDiagnosticClaimNeverWritesAfterEligibilityOrPolicyChanges(t *testing.T) {
+func TestAutomaticIntakeClaimNeverWritesAfterEligibilityOrPolicyChanges(t *testing.T) {
 	for _, change := range []string{"assignee", "status", "token user", "policy"} {
 		t.Run(change, func(t *testing.T) {
-			svc, host, w, issuesSvc, f := newDiagnosticFixture(t)
+			svc, host, w, issuesSvc, f := newIntakeFixture(t)
 			require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
-			startedDiagnosis(host, "RUNNING")
+			startedEntry(host, "RUNNING")
 			switch change {
 			case "assignee":
 				f.assignee = 99
@@ -116,7 +116,7 @@ func TestDiagnosticClaimNeverWritesAfterEligibilityOrPolicyChanges(t *testing.T)
 			case "token user":
 				f.user = 99
 			case "policy":
-				w.TrackerRoutes[0].Diagnosis = nil
+				w.TrackerRoutes[0].AutomaticIntake = nil
 			}
 			require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
 			require.Zero(t, f.puts)
@@ -124,12 +124,12 @@ func TestDiagnosticClaimNeverWritesAfterEligibilityOrPolicyChanges(t *testing.T)
 	}
 }
 
-func TestDiagnosticClaimRefusesFailedOrUnrelatedSession(t *testing.T) {
+func TestAutomaticIntakeClaimRefusesFailedOrUnrelatedSession(t *testing.T) {
 	for _, state := range []string{"FAILED", "CANCELLED", "other-profile"} {
 		t.Run(state, func(t *testing.T) {
-			svc, host, w, issuesSvc, f := newDiagnosticFixture(t)
+			svc, host, w, issuesSvc, f := newIntakeFixture(t)
 			require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
-			startedDiagnosis(host, state)
+			startedEntry(host, state)
 			if state == "other-profile" {
 				host.sessions[0].AgentProfileID, host.sessions[0].State = "implementation", "RUNNING"
 			}
@@ -139,12 +139,12 @@ func TestDiagnosticClaimRefusesFailedOrUnrelatedSession(t *testing.T) {
 	}
 }
 
-func TestDiagnosticUncertainWriteIsReconciledWithoutRepeatingPUT(t *testing.T) {
+func TestAutomaticIntakeUncertainWriteIsReconciledWithoutRepeatingPUT(t *testing.T) {
 	for _, applied := range []bool{false, true} {
 		t.Run(fmt.Sprint(applied), func(t *testing.T) {
-			svc, host, w, issuesSvc, f := newDiagnosticFixture(t)
+			svc, host, w, issuesSvc, f := newIntakeFixture(t)
 			require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
-			startedDiagnosis(host, "RUNNING")
+			startedEntry(host, "RUNNING")
 			f.failPUT, f.applyFailedPUT = true, applied
 			require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "no automatic retry")
 			err := svc.Poll(context.Background(), w, issuesSvc)
@@ -159,7 +159,7 @@ func TestDiagnosticUncertainWriteIsReconciledWithoutRepeatingPUT(t *testing.T) {
 }
 
 func TestAutoStartImportRetainsRunningTaskWhenLinkPersistenceFails(t *testing.T) {
-	svc, host, w, issuesSvc, _ := newDiagnosticFixture(t)
+	svc, host, w, issuesSvc, _ := newIntakeFixture(t)
 	host.setStateCalls, host.failSetStateAt = 0, 3
 	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "retained for native inspection")
 	require.Len(t, host.tasks, 1)
@@ -170,18 +170,18 @@ func TestAutoStartImportRetainsRunningTaskWhenLinkPersistenceFails(t *testing.T)
 }
 
 func TestAutoStartImportUnknownCreateIsNotRepeatedAfterPolicyChange(t *testing.T) {
-	svc, host, w, issuesSvc, _ := newDiagnosticFixture(t)
+	svc, host, w, issuesSvc, _ := newIntakeFixture(t)
 	host.createErr = status.Error(codes.Unavailable, "response lost")
 	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
 	host.createErr = nil
-	w.TrackerRoutes[0].Diagnosis = nil
+	w.TrackerRoutes[0].AutomaticIntake = nil
 	w.EntrySteps["bugs"][0].OnEnterActionTypes = nil
 	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "unconfirmed earlier attempt")
 	require.Len(t, host.creates, 1)
 }
 
 func TestKnownRejectedAutoStartCanRetryWithoutAnUncertainLaunch(t *testing.T) {
-	svc, host, w, issuesSvc, _ := newDiagnosticFixture(t)
+	svc, host, w, issuesSvc, _ := newIntakeFixture(t)
 	host.createErr = status.Error(codes.PermissionDenied, "tasks grant required")
 	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
 	host.createErr = nil
@@ -201,15 +201,15 @@ func TestNativeAutoStartIsExplicitAndDoesNotEnableOldIntermediateImports(t *test
 		{"old intermediate filter", false, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, host, w, issuesSvc, _ := newDiagnosticFixture(t)
-			w.TrackerRoutes[0].Diagnosis = nil
+			svc, host, w, issuesSvc, _ := newIntakeFixture(t)
+			w.TrackerRoutes[0].AutomaticIntake = nil
 			w.EntrySteps["bugs"][0].IsStartStep = tc.startStep
 			if !tc.auto {
 				w.EntrySteps["bugs"][0].OnEnterActionTypes = nil
 			}
 			if !tc.routed {
 				w.TrackerRoutes = nil
-				w.WorkflowID, w.WorkflowStepID = "bugs", "diagnosis"
+				w.WorkflowID, w.WorkflowStepID = "bugs", "intake"
 			}
 			require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
 			require.Len(t, host.creates, 1)
@@ -219,7 +219,7 @@ func TestNativeAutoStartIsExplicitAndDoesNotEnableOldIntermediateImports(t *test
 }
 
 func TestUnknownAutoStartReservesInflightCapacity(t *testing.T) {
-	svc, host, w, issuesSvc, _ := newDiagnosticFixture(t)
+	svc, host, w, issuesSvc, _ := newIntakeFixture(t)
 	w.MaxInflightTasks = 1
 	host.createErr = status.Error(codes.Unavailable, "result lost")
 	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
@@ -231,7 +231,7 @@ func TestUnknownAutoStartReservesInflightCapacity(t *testing.T) {
 func TestOverlappingWatchesCannotLaunchAnAlreadyLinkedOrUncertainIssueTwice(t *testing.T) {
 	for _, uncertain := range []bool{false, true} {
 		t.Run(fmt.Sprint(uncertain), func(t *testing.T) {
-			svc, host, first, issuesSvc, _ := newDiagnosticFixture(t)
+			svc, host, first, issuesSvc, _ := newIntakeFixture(t)
 			second, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: first.WorkspaceID, WorkflowID: first.WorkflowID, ProjectID: first.ProjectID, Enabled: true})
 			require.NoError(t, err)
 			second.TrackerRoutes, second.EntrySteps = first.TrackerRoutes, first.EntrySteps
@@ -254,4 +254,66 @@ func TestOverlappingWatchesCannotLaunchAnAlreadyLinkedOrUncertainIssueTwice(t *t
 			require.Len(t, host.creates, 1)
 		})
 	}
+}
+
+func TestAutomaticIntakeSupportsAnImplementationEntryAndAttachesItsRepository(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
+	w.RepositoryID, w.BaseBranch = "feature-repository", "develop"
+	w.TrackerRoutes[0].WorkflowID, w.TrackerRoutes[0].WorkflowStepID = "features", "implementation"
+	w.EntrySteps = map[string][]pluginsdk.WorkflowStep{"features": {{ID: "implementation", AgentProfileID: "writer", OnEnterActionTypes: []string{"auto_start_agent"}}}}
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 1)
+	created := host.creates[0]
+	require.Equal(t, "features", created.WorkflowID)
+	require.Equal(t, "implementation", *created.WorkflowStepID)
+	require.Equal(t, "writer", *created.Launch.AgentProfileID)
+	require.Len(t, created.Repositories, 1)
+	require.Equal(t, w.RepositoryID, created.Repositories[0].RepositoryID)
+	require.Equal(t, w.BaseBranch, *created.Repositories[0].BaseBranch)
+	metadata := created.Metadata[metadataKeyAutomaticIntake].(map[string]any)
+	require.Equal(t, "writer", metadata["profile_id"])
+	require.Equal(t, w.RepositoryID, metadata["repository_id"])
+	startedEntry(host, "RUNNING")
+	host.sessions[0].AgentProfileID = "writer"
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Equal(t, 1, f.puts)
+	watches, err := svc.ListWatches(context.Background(), w.WorkspaceID)
+	require.NoError(t, err)
+	require.Len(t, watches, 1)
+	// Runtime bindings above are only local until an operator saves the watch.
+	require.NoError(t, svc.UpdateWatch(context.Background(), w))
+	watches, err = svc.ListWatches(context.Background(), w.WorkspaceID)
+	require.NoError(t, err)
+	require.Equal(t, w.RepositoryID, watches[0].RepositoryID)
+	require.Equal(t, w.BaseBranch, watches[0].BaseBranch)
+}
+
+func TestAutoStartRejectsUnlimitedCapacityAndMissingProfile(t *testing.T) {
+	for _, missing := range []string{"limit", "profile"} {
+		t.Run(missing, func(t *testing.T) {
+			svc, host, w, issuesSvc, _ := newIntakeFixture(t)
+			w.TrackerRoutes[0].AutomaticIntake = nil
+			if missing == "limit" {
+				w.MaxInflightTasks = 0
+			} else {
+				w.EntrySteps["bugs"][0].AgentProfileID = ""
+			}
+			require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
+			require.Empty(t, host.creates)
+		})
+	}
+}
+
+func TestAutoStartCapsAttemptsEvenWhenEveryNativeCreateIsRejected(t *testing.T) {
+	host := newFakeHost()
+	host.createErr = status.Error(codes.PermissionDenied, "launch denied")
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "workspace", WorkflowID: "workflow", ProjectID: 1, MaxInflightTasks: 1, Enabled: true})
+	require.NoError(t, err)
+	w.EntrySteps = map[string][]pluginsdk.WorkflowStep{"workflow": {{ID: "entry", IsStartStep: true, AgentProfileID: "fixed", OnEnterActionTypes: []string{"auto_start_agent"}}}}
+	issuesSvc := newIssuesService(t, func(out http.ResponseWriter, _ *http.Request) {
+		out.Write([]byte(`{"issues":[{"id":1},{"id":2},{"id":3}],"total_count":3}`))
+	})
+	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 1, "a failed launch must not free this poll's attempt budget")
 }

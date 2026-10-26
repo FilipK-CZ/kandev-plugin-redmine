@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -27,6 +28,8 @@ type watchResponse struct {
 	WorkflowID         string         `json:"workflow_id"`
 	WorkflowStepID     string         `json:"workflow_step_id"`
 	ProjectID          int            `json:"project_id"`
+	RepositoryID       string         `json:"repository_id,omitempty"`
+	BaseBranch         string         `json:"base_branch,omitempty"`
 	TrackerID          *int           `json:"tracker_id,omitempty"`
 	StatusID           *int           `json:"status_id,omitempty"`
 	PriorityID         *int           `json:"priority_id,omitempty"`
@@ -42,6 +45,7 @@ func toWatchResponse(w watch.Watch) watchResponse {
 	return watchResponse{
 		ID: w.ID, WorkflowID: w.WorkflowID, WorkflowStepID: w.WorkflowStepID, ProjectID: w.ProjectID, TrackerID: w.TrackerID, StatusID: w.StatusID, PriorityID: w.PriorityID, AssigneeID: w.AssigneeID, CategoryID: w.CategoryID, CustomFieldFilters: w.CustomFieldFilters, Filters: w.Filters,
 		MaxInflightTasks: w.MaxInflightTasks, Enabled: w.Enabled,
+		RepositoryID: w.RepositoryID, BaseBranch: w.BaseBranch,
 	}
 }
 
@@ -60,6 +64,8 @@ func (p *redminePlugin) handleWatchesList(ctx context.Context, req *pluginsdk.Pl
 type watchSaveRequest struct {
 	ID                 string         `json:"id"`
 	ProjectID          int            `json:"project_id"`
+	RepositoryID       string         `json:"repository_id"`
+	BaseBranch         string         `json:"base_branch"`
 	TrackerID          *int           `json:"tracker_id"`
 	StatusID           *int           `json:"status_id"`
 	PriorityID         *int           `json:"priority_id"`
@@ -74,6 +80,7 @@ type watchSaveRequest struct {
 func (r watchSaveRequest) toWatch(workspaceID string) watch.Watch {
 	return watch.Watch{
 		ID: r.ID, WorkspaceID: workspaceID, ProjectID: r.ProjectID, TrackerID: r.TrackerID,
+		RepositoryID: r.RepositoryID, BaseBranch: strings.TrimSpace(r.BaseBranch),
 		StatusID: r.StatusID, PriorityID: r.PriorityID, AssigneeID: r.AssigneeID, CategoryID: r.CategoryID, CustomFieldFilters: r.CustomFieldFilters, Filters: r.Filters, MaxInflightTasks: r.MaxInflightTasks, Enabled: r.Enabled,
 	}
 }
@@ -123,6 +130,14 @@ func (p *redminePlugin) validateWatch(ctx context.Context, w watch.Watch) error 
 	}
 	if w.MaxInflightTasks < 0 {
 		return fmt.Errorf("redmine: max_inflight_tasks must be non-negative")
+	}
+	if len(w.BaseBranch) > 255 || strings.ContainsAny(w.BaseBranch, "\r\n\x00") || (w.BaseBranch != "" && w.RepositoryID == "") {
+		return fmt.Errorf("redmine: choose a repository before setting a valid base branch")
+	}
+	if w.Enabled && w.RepositoryID != "" {
+		if err := p.validateWatchRepository(ctx, w); err != nil {
+			return err
+		}
 	}
 	for name, id := range map[string]*int{"tracker_id": w.TrackerID, "status_id": w.StatusID, "priority_id": w.PriorityID, "assignee_id": w.AssigneeID, "category_id": w.CategoryID} {
 		if id != nil && *id <= 0 {

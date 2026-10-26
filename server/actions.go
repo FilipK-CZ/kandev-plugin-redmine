@@ -101,6 +101,8 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleWatchesList(ctx, req)
 	case "watches.filter_options":
 		return p.handleWatchFilterOptions(ctx, req)
+	case "watches.repositories":
+		return p.handleWatchRepositories(ctx, req)
 	case "watches.create":
 		return p.handleWatchesCreate(ctx, req)
 	case "watches.update":
@@ -446,10 +448,10 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 	statusLists := [][]fieldmapping.StatusMapping{mapping.Statuses}
 	for _, route := range mapping.TrackerRoutes {
 		statusLists = append(statusLists, route.Statuses)
-		if route.Diagnosis != nil {
-			for _, id := range []int{route.Diagnosis.FromStatusID, route.Diagnosis.WorkingStatusID} {
+		if route.AutomaticIntake != nil {
+			for _, id := range []int{route.AutomaticIntake.FromStatusID, route.AutomaticIntake.WorkingStatusID} {
 				if live, found := statusByID[id]; !found || id <= 0 || live.IsClosed {
-					return fmt.Errorf("redmine: choose live open statuses for automatic diagnosis")
+					return fmt.Errorf("redmine: choose live open statuses for automatic intake")
 				}
 			}
 		}

@@ -50,26 +50,26 @@ type Mapping struct {
 
 // TrackerRoute changes placement only for newly imported watcher tasks.
 type TrackerRoute struct {
-	RedmineTrackerID int               `json:"redmine_tracker_id"`
-	WorkflowID       string            `json:"workflow_id"`
-	WorkflowStepID   string            `json:"workflow_step_id"`
-	Statuses         []StatusMapping   `json:"statuses,omitempty"`
-	Diagnosis        *DiagnosticPolicy `json:"diagnosis,omitempty"`
+	RedmineTrackerID int                    `json:"redmine_tracker_id"`
+	WorkflowID       string                 `json:"workflow_id"`
+	WorkflowStepID   string                 `json:"workflow_step_id"`
+	Statuses         []StatusMapping        `json:"statuses,omitempty"`
+	AutomaticIntake  *AutomaticIntakePolicy `json:"automatic_intake,omitempty"`
 }
 
-// DiagnosticPolicy permits one status-only claim, independently of write-back.
-type DiagnosticPolicy struct {
+// AutomaticIntakePolicy permits one status-only claim, independently of write-back.
+type AutomaticIntakePolicy struct {
 	FromStatusID    int `json:"from_status_id"`
 	WorkingStatusID int `json:"working_status_id"`
 }
 
-func (r TrackerRoute) DiagnosticEntry(steps []pluginsdk.WorkflowStep) (pluginsdk.WorkflowStep, error) {
-	if r.Diagnosis == nil || r.Diagnosis.FromStatusID <= 0 || r.Diagnosis.WorkingStatusID <= 0 || r.Diagnosis.FromStatusID == r.Diagnosis.WorkingStatusID {
-		return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: diagnosis needs distinct source and working statuses")
+func (r TrackerRoute) IntakeEntry(steps []pluginsdk.WorkflowStep) (pluginsdk.WorkflowStep, error) {
+	if r.AutomaticIntake == nil || r.AutomaticIntake.FromStatusID <= 0 || r.AutomaticIntake.WorkingStatusID <= 0 || r.AutomaticIntake.FromStatusID == r.AutomaticIntake.WorkingStatusID {
+		return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: automatic intake needs distinct source and working statuses")
 	}
 	for _, item := range r.Statuses {
-		if (item.RedmineStatusID == r.Diagnosis.FromStatusID || item.RedmineStatusID == r.Diagnosis.WorkingStatusID) && item.WorkflowStepID != r.WorkflowStepID {
-			return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: diagnostic source and working statuses must stay unmapped or map to the diagnostic entry step")
+		if (item.RedmineStatusID == r.AutomaticIntake.FromStatusID || item.RedmineStatusID == r.AutomaticIntake.WorkingStatusID) && item.WorkflowStepID != r.WorkflowStepID {
+			return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: intake source and working statuses must stay unmapped or map to the selected entry step")
 		}
 	}
 	for _, step := range steps {
@@ -81,7 +81,7 @@ func (r TrackerRoute) DiagnosticEntry(steps []pluginsdk.WorkflowStep) (pluginsdk
 			}
 		}
 	}
-	return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: diagnosis requires an entry step with a fixed read-only profile and native auto-start enabled")
+	return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: automatic intake requires an entry step with a fixed profile and native auto-start enabled")
 }
 
 // StatusesFor keeps tracker overrides isolated from the default workflow map.
