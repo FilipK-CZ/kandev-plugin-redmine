@@ -6,7 +6,7 @@ const bundle = await readFile(new URL("./bundle.js", import.meta.url), "utf8");
 
 async function loadBundleTestHooks() {
   globalThis.window = { registerKandevPlugin() {} };
-  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke };`;
+  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke, makeRedmineCommentAction };`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   return globalThis.__redmineBundleTestHooks;
 }
@@ -23,6 +23,87 @@ test("mapping selects use host controls and explicitly added live statuses", () 
   assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
   assert.match(bundle, /SelectTrigger, \{ "data-testid": "redmine-priority-map-" \+ priority\.id \}/);
   assert.doesNotMatch(bundle, /trackerLabels|task_label|redmine-tracker-label/);
+});
+
+async function commentDialog(invoke) {
+  const { makeRedmineCommentAction } = await loadBundleTestHooks();
+  let component;
+  let cursor = 0;
+  const hooks = [];
+  const host = {
+    jsx: (type, props, ...children) => ({ type, props: props || {}, children }),
+    React: {
+      useState(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = initial; return [hooks[index], value => { hooks[index] = value; }]; },
+      useRef(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = { current: initial }; return hooks[index]; },
+    },
+    ui: { Button: "Button", Textarea: "Textarea", Label: "Label", Badge: "Badge" },
+    api: { invokeAction: invoke },
+    toast: { error(message) { throw new Error(message); } },
+    openModal({ content }) { component = content; return { close() {} }; },
+  };
+  await makeRedmineCommentAction(host).run({ workspaceId: "workspace-1", taskId: "task-1" });
+  const render = () => { cursor = 0; return component(); };
+  const all = (node) => !node || typeof node !== "object" ? [] : [node, ...node.children.flat(Infinity).flatMap(all)];
+  return { render, find: id => all(render()).find(node => node.props["data-testid"] === id), select: () => all(render()).find(node => node.type === "select") };
+}
+
+test("comment preview never publishes and approval uses the immutable draft id", async () => {
+  const calls = [];
+  let finish;
+  const draft = { id: "draft-id", state: "prepared", notes: "Reviewed text", private_notes: false };
+  const dialog = await commentDialog(async (key, context) => {
+    calls.push({ key, context });
+    if (key === "comments.get") return { issue: { id: 42, url: "https://redmine.example/issues/42", subject: "Example" }, current_id: "", context_hash: "context-hash" };
+    if (key === "comments.prepare") return draft;
+    if (key === "comments.approve") return new Promise(resolve => { finish = () => resolve({ ...draft, state: "published", journal_id: 123 }); });
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-preview").props.disabled, true);
+  dialog.find("redmine-comment-notes").props.onChange({ target: { value: "Reviewed text" } });
+  dialog.select().props.onChange({ target: { value: "public" } });
+  await dialog.find("redmine-comment-preview").props.onClick();
+  assert.equal(calls.some(call => call.key === "comments.approve"), false);
+  assert.equal(dialog.find("redmine-comment-preview-text").children[0], "Reviewed text");
+  const approve = dialog.find("redmine-comment-approve").props.onClick;
+  const pending = approve();
+  await approve();
+  assert.equal(calls.filter(call => call.key === "comments.approve").length, 1);
+  assert.deepEqual(calls.at(-1).context, { workspaceId: "workspace-1", taskId: "task-1", body: { draft_id: "draft-id" } });
+  finish(); await pending;
+  assert.ok(dialog.find("redmine-comment-published"));
+});
+
+test("lost comment approval acknowledgement offers read-only reconciliation", async () => {
+  const calls = [];
+  const draft = { id: "draft-id", state: "prepared", notes: "Exact proposed text", private_notes: true };
+  const dialog = await commentDialog(async (key) => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: "draft-id", can_approve: true };
+    if (key === "comments.approve") throw new Error("Connection lost");
+    if (key === "comments.reconcile") return { ...draft, state: "published", journal_id: 123 };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-approve").props.onClick();
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  assert.ok(dialog.find("redmine-comment-reconcile"));
+  await dialog.find("redmine-comment-reconcile").props.onClick();
+  assert.ok(dialog.find("redmine-comment-published"));
+  assert.deepEqual(calls, ["comments.get", "comments.approve", "comments.reconcile"]);
+});
+
+test("editing a prepared comment invalidates its approval before accepting edits", async () => {
+  const calls = [];
+  const draft = { id: "draft-id", state: "prepared", notes: "Original text", private_notes: false };
+  const dialog = await commentDialog(async (key) => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: "draft-id", can_approve: true };
+    if (key === "comments.discard") return { ...draft, state: "cancelled" };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.ok(dialog.find("redmine-comment-notes"));
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  assert.deepEqual(calls, ["comments.get", "comments.get", "comments.discard"]);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

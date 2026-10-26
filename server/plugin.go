@@ -48,13 +48,14 @@ func configuredSyncPollInterval() time.Duration {
 type redminePlugin struct {
 	pluginsdk.UnimplementedPlugin
 
-	mu       sync.Mutex
-	ready    bool
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
-	stopDone chan struct{}
-	pollNow  chan struct{}
+	mu        sync.Mutex
+	commentMu sync.Mutex
+	ready     bool
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stopDone  chan struct{}
+	pollNow   chan struct{}
 
 	connectionSvc   *connection.Service
 	projectsSvc     *projects.Service
@@ -215,6 +216,13 @@ func (p *redminePlugin) pollSync(ctx context.Context, workspaceID string, issues
 	if err != nil {
 		return err
 	}
+	replies, err := p.replySettings(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if replies.WorkflowID == mapping.WorkflowID {
+		opts.PreserveWorkflowStepID = replies.StepID
+	}
 
 	return p.syncSvc.PollInbound(ctx, workspaceID, issuesSvc, mapping, projectIDs, opts)
 }
@@ -319,6 +327,10 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 		return nil
 	}
 
+	if err := p.autoDraftReply(ctx, e, link.WorkspaceID, taskID, toStepID); err != nil {
+		return fmt.Errorf("redmine: preparing reply draft: %w", err)
+	}
+
 	mapping, found, err := p.fieldmappingSvc.Get(ctx, link.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("redmine: OnEvent task.moved: reading field mapping for workspace %s: %w", link.WorkspaceID, err)
@@ -364,6 +376,9 @@ func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string, 
 		return err
 	}
 	if err := p.syncSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.Host().DeleteState(ctx, "workspace", workspaceID, replySettingsKey); err != nil {
 		return err
 	}
 	if err := p.connectionSvc.Disconnect(ctx, workspaceID); err != nil {
