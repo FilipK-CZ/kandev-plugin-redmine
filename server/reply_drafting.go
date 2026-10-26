@@ -366,14 +366,22 @@ func (p *redminePlugin) canRequestReply(ctx context.Context, workspaceID, taskID
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return false, err
 	}
-	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request)
+	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request, false)
 	return message != nil, err
 }
 
 // Completion is a native runtime fact, independent of whether the response is
 // a valid proposal, a refusal, or a request for missing evidence.
-func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, taskID string, request replyRequest) (*pluginsdk.Message, error) {
-	message, err := p.latestTaskMessage(ctx, taskID)
+func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, taskID string, request replyRequest, forPublication bool) (*pluginsdk.Message, error) {
+	if request.SessionID == "" || request.ProfileID == "" {
+		return nil, fmt.Errorf("redmine: the drafting session or profile is unavailable")
+	}
+	messageSessionID := request.SessionID
+	// A new stage checks the originating session; publishing still requires the latest task response.
+	if forPublication {
+		messageSessionID = ""
+	}
+	message, err := p.latestTaskMessage(ctx, taskID, messageSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +396,7 @@ func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, 
 	if !messageAt.After(requestedAt) {
 		return nil, nil
 	}
-	if request.SessionID == "" || request.ProfileID == "" || message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
+	if message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
 		return nil, fmt.Errorf("redmine: the final response does not match the drafting session")
 	}
 	sessions, info, err := p.Host().Sessions().List(ctx, pluginsdk.SessionFilter{TaskIDs: []string{taskID}, WorkspaceIDs: []string{workspaceID}}, pluginsdk.Page{Limit: 100})
@@ -406,7 +414,7 @@ func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, 
 		}
 		if s.ID == request.SessionID {
 			session = s
-		} else if s.State == "CREATED" || s.State == "STARTING" || s.State == "RUNNING" {
+		} else if (forPublication && s.State == "CREATED") || s.State == "STARTING" || s.State == "RUNNING" {
 			return nil, nil
 		}
 	}

@@ -49,6 +49,11 @@ not start new draft work. After admission or native recovery, an operator can us
 **Generate from current issue** to make an explicit request.
 After a verified completed response, an operator may request a new draft even if
 the previous response reported missing evidence or contained no valid proposal.
+Completion is checked in that request's originating session, so intervening
+implementation or test-session messages do not block a later communication stage.
+An unstarted session for the next stage can receive its new request. Automatic
+publication retains the stricter check of the latest response across the task and
+requires all other sessions to be inactive.
 Running agents, pending human input and unconfirmed dispatches still block another
 request; replaying the same request ID never starts new work.
 

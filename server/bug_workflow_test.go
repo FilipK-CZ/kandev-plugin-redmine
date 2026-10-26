@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type multiReplyWorkflows struct{ autoStartEntry bool }
@@ -50,7 +51,12 @@ func TestTwoCommunicationStagesUseTheirOwnPromptWithoutPublishing(t *testing.T) 
 		require.Contains(t, h.sends[i], "@"+multiReplyConfig().AdditionalSteps[i].PromptName)
 		finishAutomaticDraft(t, p, h, false)
 		require.NoError(t, p.pollReplies(context.Background(), "ws-1"))
+		if i == 0 {
+			h.messages = append(h.messages, pluginsdk.Message{ID: "implementation-output", SessionID: "implementation-session", TaskID: "task-1", TurnID: "implementation-turn", AuthorType: "agent", Type: "message", Content: "Implementation completed; browser acceptance passed.", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+			h.extraSessions = []pluginsdk.Session{{ID: "implementation-session", TaskID: "task-1", AgentProfileID: "implementation-profile", State: "COMPLETED", StartedAt: "2026-10-26T13:00:00Z"}, {ID: "fix-ready-session", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "CREATED", StartedAt: "2026-10-26T14:00:00Z"}}
+		}
 	}
+	require.Equal(t, []string{"draft-session", "fix-ready-session"}, h.sessionIDs)
 	puts, _ := f.snapshot()
 	require.Zero(t, puts)
 	settings := handle(t, p, "replies.settings.get", "ws-1", "", nil)

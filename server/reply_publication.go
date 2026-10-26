@@ -179,7 +179,7 @@ func (p *redminePlugin) publishAutomaticReply(ctx context.Context, workspaceID, 
 	if task.State != "WAITING_FOR_INPUT" && task.State != "COMPLETED" && task.State != "IDLE" {
 		return nil
 	}
-	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request)
+	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request, true)
 	if err != nil {
 		return hold(err.Error())
 	}
