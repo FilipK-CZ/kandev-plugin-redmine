@@ -36,6 +36,9 @@ func TestIntakeEntryCannotSkipDiagnosisOrUseAnUnconfiguredLaunch(t *testing.T) {
 	route.Statuses = []StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "implementation"}}
 	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
 	require.ErrorContains(t, err, "selected entry step")
+	route.Statuses[0].WorkflowStepID = ""
+	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
+	require.NoError(t, err, "an explicitly unmapped source/working status is valid")
 	route.Statuses[0].WorkflowStepID = "diagnosis"
 	entry.OnEnterActionTypes = nil
 	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})

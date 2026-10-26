@@ -68,7 +68,7 @@ func (r TrackerRoute) IntakeEntry(steps []pluginsdk.WorkflowStep) (pluginsdk.Wor
 		return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: automatic intake needs distinct source and working statuses")
 	}
 	for _, item := range r.Statuses {
-		if (item.RedmineStatusID == r.AutomaticIntake.FromStatusID || item.RedmineStatusID == r.AutomaticIntake.WorkingStatusID) && item.WorkflowStepID != r.WorkflowStepID {
+		if (item.RedmineStatusID == r.AutomaticIntake.FromStatusID || item.RedmineStatusID == r.AutomaticIntake.WorkingStatusID) && item.WorkflowStepID != "" && item.WorkflowStepID != r.WorkflowStepID {
 			return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: intake source and working statuses must stay unmapped or map to the selected entry step")
 		}
 	}
