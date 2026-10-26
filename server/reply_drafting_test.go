@@ -27,13 +27,31 @@ func (r replyTestWorkflows) ListSteps(context.Context, string) ([]pluginsdk.Work
 
 type replyMessageHost struct {
 	*fakeHost
-	mu       sync.Mutex
-	sends    []string
-	messages []pluginsdk.Message
-	sendErr  error
+	mu             sync.Mutex
+	sends          []string
+	messages       []pluginsdk.Message
+	sendErr        error
+	sessions       []pluginsdk.Session
+	sessionIDs     []string
+	sessionHasMore bool
 }
 
 func (h *replyMessageHost) Messages() pluginsdk.MessageReader { return replyMessages{host: h} }
+func (h *replyMessageHost) Sessions() pluginsdk.SessionReader { return replySessions{host: h} }
+
+type replySessions struct {
+	pluginsdk.SessionReader
+	host *replyMessageHost
+}
+
+func (r replySessions) List(_ context.Context, filter pluginsdk.SessionFilter, _ pluginsdk.Page) ([]pluginsdk.Session, *pluginsdk.PageInfo, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	if len(filter.TaskIDs) != 1 || filter.TaskIDs[0] != "task-1" || len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" {
+		return nil, nil, fmt.Errorf("unexpected session scope")
+	}
+	return append([]pluginsdk.Session(nil), r.host.sessions...), &pluginsdk.PageInfo{HasMore: r.host.sessionHasMore}, nil
+}
 
 type replyMessages struct {
 	pluginsdk.MessageReader
@@ -51,15 +69,16 @@ func (r replyMessages) List(_ context.Context, filter pluginsdk.MessageFilter, _
 func (r replyMessages) Send(_ context.Context, taskID, sessionID, text string) (*pluginsdk.MessageDispatch, error) {
 	r.host.mu.Lock()
 	defer r.host.mu.Unlock()
-	if taskID != "task-1" || sessionID != "" {
+	if taskID != "task-1" {
 		return nil, fmt.Errorf("unexpected dispatch scope")
 	}
 	r.host.sends = append(r.host.sends, text)
+	r.host.sessionIDs = append(r.host.sessionIDs, sessionID)
 	if r.host.sendErr != nil {
 		return nil, r.host.sendErr
 	}
 	r.host.messages = append(r.host.messages, pluginsdk.Message{ID: "request", TaskID: taskID, AuthorType: "user", Type: "message", Content: text, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-	return &pluginsdk.MessageDispatch{SessionID: "draft-session", Status: "queued"}, nil
+	return &pluginsdk.MessageDispatch{SessionID: sessionID, Status: "queued"}, nil
 }
 
 func newReplyFixture(t *testing.T) (*redminePlugin, *replyMessageHost, *commentFixture) {
@@ -70,11 +89,54 @@ func newReplyFixture(t *testing.T) (*redminePlugin, *replyMessageHost, *commentF
 	h.tasks["task-1"].WorkflowID = "wf-1"
 	h.tasks["task-1"].WorkflowStepID = "reply-step"
 	h.mu.Unlock()
-	wrapped := &replyMessageHost{fakeHost: h}
+	wrapped := &replyMessageHost{fakeHost: h, sessions: []pluginsdk.Session{{ID: "draft-session", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "CREATED", StartedAt: "2026-10-26T12:00:00Z"}}}
 	p.UnimplementedPlugin.SetHost(wrapped)
 	settings := handle(t, p, "replies.settings.save", "ws-1", "", replySettings{WorkflowID: "wf-1", StepID: "reply-step", PromptName: "client-reply"})
 	require.Nil(t, settings["kind"])
 	return p, wrapped, f
+}
+
+func TestReplyRequiresAnInitializedMatchingSessionBeforeDispatch(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sessions []pluginsdk.Session
+		hasMore  bool
+	}{
+		"unopened task":          {},
+		"implementation session": {sessions: []pluginsdk.Session{{ID: "implementation", TaskID: "task-1", AgentProfileID: "write-profile", State: "WAITING_FOR_INPUT", StartedAt: "2026-10-26T12:00:00Z"}}},
+		"incomplete history":     {hasMore: true},
+		"foreign task":           {sessions: []pluginsdk.Session{{ID: "foreign", TaskID: "task-2", AgentProfileID: "read-only-profile", State: "CREATED", StartedAt: "2026-10-26T12:00:00Z"}}},
+		"failed session":         {sessions: []pluginsdk.Session{{ID: "failed", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "FAILED", StartedAt: "2026-10-26T12:00:00Z"}}},
+		"unknown timestamp":      {sessions: []pluginsdk.Session{{ID: "missing-time", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "CREATED"}}},
+		"other active work": {sessions: []pluginsdk.Session{
+			{ID: "draft-session", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "CREATED", StartedAt: "2026-10-26T12:00:00Z"},
+			{ID: "implementation", TaskID: "task-1", AgentProfileID: "write-profile", State: "RUNNING", StartedAt: "2026-10-26T11:00:00Z"},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, h, f := newReplyFixture(t)
+			h.sessions, h.sessionHasMore = tc.sessions, tc.hasMore
+			_, err := p.requestReply(context.Background(), "ws-1", "task-1", "manual:first")
+			require.Error(t, err)
+			require.Empty(t, h.sends)
+			_, found, err := p.Host().GetState(context.Background(), "task", "task-1", replyLatestKey)
+			require.NoError(t, err)
+			require.False(t, found, "preflight must not strand an unsent request")
+			puts, _ := f.snapshot()
+			require.Zero(t, puts)
+		})
+	}
+}
+
+func TestReplyPinsTheNewestMatchingSessionInsteadOfTheTaskDefault(t *testing.T) {
+	p, h, _ := newReplyFixture(t)
+	h.sessions = []pluginsdk.Session{
+		{ID: "implementation", TaskID: "task-1", AgentProfileID: "write-profile", State: "WAITING_FOR_INPUT", StartedAt: "2026-10-26T13:00:00Z"},
+		{ID: "old-review", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "WAITING_FOR_INPUT", StartedAt: "2026-10-26T11:00:00Z"},
+		{ID: "draft-session", TaskID: "task-1", AgentProfileID: "read-only-profile", State: "CREATED", StartedAt: "2026-10-26T12:00:00Z"},
+	}
+	_, err := p.requestReply(context.Background(), "ws-1", "task-1", "manual:first")
+	require.NoError(t, err)
+	require.Equal(t, []string{"draft-session"}, h.sessionIDs)
 }
 
 func movedReplyEvent(id string) *pluginsdk.Event {
