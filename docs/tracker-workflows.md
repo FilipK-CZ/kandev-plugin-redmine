@@ -4,8 +4,9 @@ In **Field mapping → Tracker → new task workflow**, add a live Redmine track
 a workspace workflow and an explicit entry step, then save the mapping. Trackers,
 projects and workflow IDs are configuration, never compiled into the plugin.
 
-The route overrides the existing watch's default placement only when creating a
-new watcher task. Other trackers keep the default workflow. Existing imports,
+The route overrides default placement only when creating a new watcher task.
+Other trackers use the current **Default workflow** from Field mapping, not an
+old default cached when the watch was created. Existing imports,
 watch IDs, deduplication records, links and in-flight work are not migrated or
 replayed. Removing a route affects future imports only.
 

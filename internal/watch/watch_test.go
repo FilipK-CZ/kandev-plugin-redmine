@@ -316,6 +316,12 @@ func TestTrackerRoutingOnlyChangesNewImportsAndRetainsDefaultForOtherTrackers(t 
 		require.Equal(t, workflowID, host.creates[i].WorkflowID)
 	}
 	require.Equal(t, "diagnosis", *host.creates[2].WorkflowStepID)
+	w.TrackerRoutes = nil
+	page = `{"issues":[{"id":46,"tracker":{"id":8}}],"total_count":1}`
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 5)
+	require.Equal(t, "wf-default", host.creates[4].WorkflowID, "removing an override restores the default for future imports")
+	require.Equal(t, "backlog", *host.creates[4].WorkflowStepID)
 }
 
 func TestPoll_AlreadySeenIssue_CreatesNoSecondTask(t *testing.T) {

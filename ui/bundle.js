@@ -692,7 +692,7 @@ function makeSettingsComponent(host) {
         { className: "space-y-6" },
         h("div", { className: "space-y-3", "data-testid": "redmine-tracker-routes" },
           h("h4", { className: "text-sm font-medium" }, "Tracker → new task workflow"),
-          h("p", { className: "text-sm text-muted-foreground" }, "Overrides placement for new watcher imports only. Existing tasks stay in place. Routed workflows manage their own stages; default Redmine status mapping does not move them. Entry steps must not auto-start an agent."),
+          h("p", { className: "text-sm text-muted-foreground" }, "Overrides placement for new watcher imports only. Trackers without a route use the current default workflow below; remove a route to restore that default. Existing tasks stay in place. Routed workflows manage their own stages; default Redmine status mapping does not move them. Entry steps must not auto-start an agent."),
           trackerRoutes.map((route, index) => {
             const change = patch => setTrackerRoutes(trackerRoutes.map((item, i) => i === index ? { ...item, ...patch } : item));
             const steps = workflows.find(workflow => workflow.id === route.workflow_id)?.steps || [];
@@ -713,7 +713,7 @@ function makeSettingsComponent(host) {
           }),
           h(Button, { type: "button", variant: "outline", disabled: saving || trackerRoutes.length >= 20, "data-testid": "redmine-route-add", onClick: () => setTrackerRoutes([...trackerRoutes, { redmine_tracker_id: 0, workflow_id: "", workflow_step_id: "" }]) }, "Add tracker route")),
         h("div", { className: "space-y-2" },
-          h(Label, { htmlFor: "redmine-mapping-workflow" }, "Kandev workflow"),
+          h(Label, { htmlFor: "redmine-mapping-workflow" }, "Default workflow"),
           h(Select, { value: workflowId, onValueChange: (nextWorkflowId) => {
             const nextWorkflow = workflows.find((workflow) => workflow.id === nextWorkflowId);
             const allowedStepIDs = new Set(((nextWorkflow && nextWorkflow.steps) || []).map((step) => step.id));

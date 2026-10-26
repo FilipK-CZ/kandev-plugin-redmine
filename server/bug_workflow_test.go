@@ -151,21 +151,21 @@ func TestTrackerRouteValidationUsesLiveTrackerAndScopedManualEntry(t *testing.T)
 
 func TestExistingWatchUsesCurrentTrackerRoutingOnEachPoll(t *testing.T) {
 	p, h := newTestPlugin(t)
-	_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws-1", ProjectID: 1, WorkflowID: "wf-1", WorkflowStepID: "backlog", Enabled: true})
+	_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws-1", ProjectID: 1, WorkflowID: "old-default", WorkflowStepID: "old-entry", Enabled: true})
 	require.NoError(t, err)
 	mapping := fieldmapping.Mapping{WorkflowID: "wf-1", TrackerRoutes: []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "wf-bug", WorkflowStepID: "diagnosis"}}}
 	require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws-1", mapping))
 	srv := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, _ *http.Request) {
-		_, _ = out.Write([]byte(`{"issues":[{"id":42,"tracker":{"id":8}}],"total_count":1}`))
+		_, _ = out.Write([]byte(`{"issues":[{"id":42,"tracker":{"id":8}},{"id":43,"tracker":{"id":2}}],"total_count":2}`))
 	}))
 	defer srv.Close()
 	require.NoError(t, p.pollWatches(context.Background(), "ws-1", issues.New(redmineclient.New(srv.URL, "key", srv.Client()))))
-	require.Len(t, h.tasks, 1)
-	for _, task := range h.tasks {
-		require.Equal(t, "wf-bug", task.WorkflowID)
-		require.Equal(t, "diagnosis", task.WorkflowStepID)
-	}
+	require.Len(t, h.tasks, 2)
+	require.Equal(t, "wf-bug", h.tasks["task-1"].WorkflowID)
+	require.Equal(t, "diagnosis", h.tasks["task-1"].WorkflowStepID)
+	require.Equal(t, "wf-1", h.tasks["task-2"].WorkflowID, "unmapped trackers use the current default, not an old watch snapshot")
+	require.Empty(t, h.tasks["task-2"].WorkflowStepID, "old-workflow entry step must not leak into the new default")
 	watches, err := p.watchSvc.ListWatches(context.Background(), "ws-1")
 	require.NoError(t, err)
-	require.Equal(t, "wf-1", watches[0].WorkflowID, "route is resolved dynamically, not persisted onto the watch")
+	require.Equal(t, "old-default", watches[0].WorkflowID, "placement is resolved dynamically, without rewriting watch or dedup state")
 }

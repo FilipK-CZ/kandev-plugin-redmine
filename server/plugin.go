@@ -247,11 +247,9 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 			}
 		}
 		if mappingFound {
+			// Resolve all new-import placement from current settings without migrating existing tasks.
+			w = applyWatchMapping(w, mapping)
 			w.TrackerRoutes = mapping.TrackerRoutes
-			// Priority mappings are workspace settings, unlike a watch's
-			// placement. Resolve them on every poll so new watcher tasks use a
-			// changed setting without requiring each watch to be edited.
-			w = applyWatchPriorityMapping(w, mapping)
 		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
 			return err
@@ -266,6 +264,7 @@ func needsWatchBackfill(w watch.Watch) bool {
 
 func applyWatchMapping(w watch.Watch, mapping fieldmapping.Mapping) watch.Watch {
 	w.WorkflowID = mapping.WorkflowID
+	w.WorkflowStepID = ""
 	if w.StatusID != nil {
 		w.WorkflowStepID, _ = mapping.WorkflowStepForStatus(*w.StatusID)
 	}
