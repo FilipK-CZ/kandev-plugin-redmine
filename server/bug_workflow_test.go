@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
@@ -193,4 +196,45 @@ func TestExistingWatchUsesCurrentTrackerRoutingOnEachPoll(t *testing.T) {
 	watches, err := p.watchSvc.ListWatches(context.Background(), "ws-1")
 	require.NoError(t, err)
 	require.Equal(t, "old-default", watches[0].WorkflowID, "placement is resolved dynamically, without rewriting watch or dedup state")
+}
+
+type unavailableRouteWorkflows struct{ multiReplyWorkflows }
+
+func (r unavailableRouteWorkflows) ListSteps(ctx context.Context, workflowID string) ([]pluginsdk.WorkflowStep, error) {
+	if workflowID == "removed-workflow" {
+		return nil, status.Error(codes.NotFound, "workflow removed")
+	}
+	return r.multiReplyWorkflows.ListSteps(ctx, workflowID)
+}
+
+func TestUnavailableRouteCannotBlockUnrelatedWatchOrCreateAManualFallback(t *testing.T) {
+	for _, includeBrokenWatch := range []bool{false, true} {
+		t.Run(fmt.Sprint(includeBrokenWatch), func(t *testing.T) {
+			p, host := newTestPlugin(t)
+			host.workflowReader = unavailableRouteWorkflows{}
+			brokenTracker, healthyTracker := 8, 9
+			if includeBrokenWatch {
+				_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws", ProjectID: 1, WorkflowID: "wf-1", TrackerID: &brokenTracker, Enabled: true})
+				require.NoError(t, err)
+			}
+			_, err := p.watchSvc.CreateWatch(context.Background(), watch.Watch{WorkspaceID: "ws", ProjectID: 1, WorkflowID: "wf-1", TrackerID: &healthyTracker, Enabled: true})
+			require.NoError(t, err)
+			require.NoError(t, p.fieldmappingSvc.Save(context.Background(), "ws", fieldmapping.Mapping{WorkflowID: "wf-1", TrackerRoutes: []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "removed-workflow", WorkflowStepID: "entry"}, {RedmineTrackerID: 9, WorkflowID: "wf-bug", WorkflowStepID: "diagnosis"}}}))
+			srv := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, req *http.Request) {
+				tracker := req.URL.Query().Get("tracker_id")
+				fmt.Fprintf(out, `{"issues":[{"id":4%s,"tracker":{"id":%s}}],"total_count":1}`, tracker, tracker)
+			}))
+			defer srv.Close()
+			err = p.pollWatches(context.Background(), "ws", issues.New(redmineclient.New(srv.URL, "key", srv.Client())))
+			if includeBrokenWatch {
+				require.ErrorContains(t, err, "removed-workflow")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Len(t, host.tasks, 1)
+			for _, task := range host.tasks {
+				require.Equal(t, "wf-bug", task.WorkflowID)
+			}
+		})
+	}
 }

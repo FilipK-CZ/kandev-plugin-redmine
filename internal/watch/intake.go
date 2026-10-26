@@ -73,6 +73,9 @@ func (s *Service) claimIntake(ctx context.Context, w Watch, taskID string, token
 		return fmt.Errorf("watch: intake claim task %s is outside its original watch/workflow", taskID)
 	}
 	if claim.State == "pending" {
+		if err := w.UnavailableWorkflows[claim.WorkflowID]; err != nil {
+			return fmt.Errorf("watch: workflow %s unavailable for pending intake %s: %w", claim.WorkflowID, taskID, err)
+		}
 		if task.State == "FAILED" || task.State == "CANCELLED" {
 			return fmt.Errorf("watch: intake task %s failed before its claim was confirmed; inspect the native launch", taskID)
 		}

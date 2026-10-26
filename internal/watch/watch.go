@@ -67,10 +67,11 @@ type Watch struct {
 	Filters          []Filter
 	PriorityMappings map[int]string
 	// Resolved from current workspace settings on every poll, not watch state.
-	TrackerRoutes    []fieldmapping.TrackerRoute
-	EntrySteps       map[string][]pluginsdk.WorkflowStep
-	MaxInflightTasks int // 0 = unlimited
-	Enabled          bool
+	TrackerRoutes        []fieldmapping.TrackerRoute
+	EntrySteps           map[string][]pluginsdk.WorkflowStep
+	UnavailableWorkflows map[string]error
+	MaxInflightTasks     int // 0 = unlimited
+	Enabled              bool
 }
 
 // Filter is a validated Redmine issue-list predicate.
@@ -383,6 +384,9 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 			w.WorkflowID, w.WorkflowStepID = route.WorkflowID, route.WorkflowStepID
 			statuses = route.Statuses
 			routed = true
+			if err := w.UnavailableWorkflows[w.WorkflowID]; err != nil {
+				return fmt.Errorf("watch: workflow %s unavailable for issue %d: %w", w.WorkflowID, issue.ID, err)
+			}
 			if route.AutomaticIntake != nil {
 				entry, err := route.IntakeEntry(w.EntrySteps[route.WorkflowID])
 				if err != nil {
@@ -403,6 +407,9 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 			}
 			break
 		}
+	}
+	if err := w.UnavailableWorkflows[w.WorkflowID]; err != nil {
+		return fmt.Errorf("watch: workflow %s unavailable for issue %d: %w", w.WorkflowID, issue.ID, err)
 	}
 	if step, mapped := (fieldmapping.Mapping{Statuses: statuses}).WorkflowStepForStatus(issue.StatusID); mapped {
 		w.WorkflowStepID = step

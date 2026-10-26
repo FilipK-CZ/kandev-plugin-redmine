@@ -317,3 +317,27 @@ func TestAutoStartCapsAttemptsEvenWhenEveryNativeCreateIsRejected(t *testing.T) 
 	require.Error(t, svc.Poll(context.Background(), w, issuesSvc))
 	require.Len(t, host.creates, 1, "a failed launch must not free this poll's attempt budget")
 }
+
+func TestUnavailableRouteDoesNotBlockAnotherWorkflowsPendingIntake(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	startedEntry(host, "RUNNING")
+	w.UnavailableWorkflows = map[string]error{"removed-workflow": status.Error(codes.NotFound, "removed")}
+	w.TrackerRoutes = append(w.TrackerRoutes, fieldmapping.TrackerRoute{RedmineTrackerID: 99, WorkflowID: "removed-workflow", WorkflowStepID: "entry", AutomaticIntake: &fieldmapping.AutomaticIntakePolicy{FromStatusID: 1, WorkingStatusID: 3}})
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Equal(t, 1, f.puts)
+	require.Len(t, host.creates, 1)
+}
+
+func TestUnavailableIntakeEntryRecoversWithoutCreatingAnotherTask(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	startedEntry(host, "RUNNING")
+	w.UnavailableWorkflows = map[string]error{"bugs": status.Error(codes.Unavailable, "temporary failure")}
+	require.ErrorContains(t, svc.Poll(context.Background(), w, issuesSvc), "pending intake")
+	require.Zero(t, f.puts)
+	w.UnavailableWorkflows = nil
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Equal(t, 1, f.puts)
+	require.Len(t, host.creates, 1)
+}

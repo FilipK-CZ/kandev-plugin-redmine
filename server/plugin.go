@@ -253,6 +253,7 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 			w = applyWatchMapping(w, mapping)
 			w.TrackerRoutes = mapping.TrackerRoutes
 			w.EntrySteps = map[string][]pluginsdk.WorkflowStep{}
+			w.UnavailableWorkflows = map[string]error{}
 			workflowIDs := map[string]bool{mapping.WorkflowID: true}
 			for _, route := range mapping.TrackerRoutes {
 				workflowIDs[route.WorkflowID] = true
@@ -261,7 +262,8 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 				for id := range workflowIDs {
 					steps, err := p.Host().Workflows().ListSteps(ctx, id)
 					if err != nil {
-						return err
+						w.UnavailableWorkflows[id] = err
+						continue
 					}
 					w.EntrySteps[id] = steps
 				}
