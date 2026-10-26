@@ -211,9 +211,11 @@ jobs:
         working-directory: plugin
         run: make verify-package
 
-      - name: Extract checksums
+      - name: Prepare release downloads
         working-directory: plugin
-        run: tar -xzf kandev-plugin-redmine-*.tar.gz checksums.txt
+        run: |
+          cp kandev-plugin-redmine-*.tar.gz kandev-plugin-redmine.tar.gz
+          sha256sum kandev-plugin-redmine*.tar.gz > checksums.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -221,5 +223,6 @@ jobs:
           tag_name: ${{ github.event_name == 'push' && github.ref_name || needs.prepare.outputs.tag }}
           files: |
             plugin/kandev-plugin-redmine-*.tar.gz
+            plugin/kandev-plugin-redmine.tar.gz
             plugin/checksums.txt
           generate_release_notes: true
