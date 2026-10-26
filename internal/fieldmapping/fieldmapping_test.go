@@ -10,6 +10,7 @@ import (
 func TestService_SaveAndGet_RoundTrips(t *testing.T) {
 	svc := New(newFakeHost())
 	mapping := Mapping{
+		TrackerRoutes: []TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis"}},
 		Statuses: []StatusMapping{
 			{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
 		},

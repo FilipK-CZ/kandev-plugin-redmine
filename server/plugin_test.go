@@ -214,6 +214,10 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	defer r.host.mu.Unlock()
 	r.host.nextID++
 	task := &pluginsdk.Task{ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID, Title: in.Title, Description: in.Description, State: "RUNNING", Metadata: in.Metadata}
+	task.WorkflowID = in.WorkflowID
+	if in.WorkflowStepID != nil {
+		task.WorkflowStepID = *in.WorkflowStepID
+	}
 	r.host.tasks[task.ID] = task
 	return task, nil
 }

@@ -14,9 +14,11 @@ and writing rules are never compiled into the plugin. The plugin ID is unchanged
    auto-start and all automatic exit transitions: the plugin owns the initial
    message, and a human owns the exit. Do not map this step to a Redmine status.
 4. In the Redmine integration's **Client replies** section, select the workflow,
-   step and exact saved prompt name. An empty step disables generation. The
-   configured communication step is held against inbound status-sync moves;
-   title/description/priority synchronization and all other steps keep their rules.
+   step and exact saved prompt name. Use **Add communication step** for additional
+   stages or workflows, for example diagnosis and fix-ready messages. Each entry
+   has its own prompt and publication mode. An empty default step disables that
+   entry; remove unused additional entries. All configured communication steps
+   are held against inbound status-sync moves; ordinary field sync continues.
 5. Route the desired task handoff to this step. Keep the connection enabled.
 
 **Publish replies automatically** is off by default, including upgrades and
@@ -24,6 +26,10 @@ workspaces with existing settings. Off means an operator must approve each exact
 comment. Turning it on and saving authorizes the plugin to append completed
 replies without per-comment approval. The setting is independent of the empty-step
 drafting switch and the integration's overall enabled/paused switch.
+The original single-step configuration is preserved on upgrade. New entries
+default to manual approval. Automatic publishing consent is scoped to one
+workflow, step and prompt; moving to another stage cannot publish the previous
+stage's draft. Saving another entry does not rotate unrelated publication consent.
 
 Entering the step sends one draft request with live issue details and public
 journals to the newest live session of its configured read-only profile. The
@@ -43,6 +49,11 @@ not start new draft work. After admission or native recovery, an operator can us
 **Generate from current issue** to make an explicit request.
 After a verified completed response, an operator may request a new draft even if
 the previous response reported missing evidence or contained no valid proposal.
+Completion is checked in that request's originating session, so intervening
+implementation or test-session messages do not block a later communication stage.
+An unstarted session for the next stage can receive its new request. Automatic
+publication retains the stricter check of the latest response across the task and
+requires all other sessions to be inactive.
 Running agents, pending human input and unconfirmed dispatches still block another
 request; replaying the same request ID never starts new work.
 

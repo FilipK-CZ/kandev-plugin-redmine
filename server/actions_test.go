@@ -662,7 +662,7 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 		case "/issue_statuses.json":
 			_, _ = w.Write([]byte(`{"issue_statuses":[{"id":1,"name":"Server Open","is_closed":false}]}`))
 		case "/trackers.json":
-			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"trackers":[{"id":2,"name":"Task"}]}`))
 		case "/enumerations/issue_priorities.json":
 			_, _ = w.Write([]byte(`{"issue_priorities":[{"id":3,"name":"Server High"}]}`))
 		case "/custom_fields.json":
@@ -687,7 +687,7 @@ func TestHandleAction_FieldMappingSaveValidatesAndNormalizesLiveValues(t *testin
 	require.Equal(t, "Server High", mapping.Priorities[0].RedmineName)
 	loaded := handle(t, p, "fieldmapping.get", "ws-1", "", nil)
 	require.NotContains(t, loaded, "trackers")
-	require.NotContains(t, loaded, "live_trackers")
+	require.Contains(t, loaded, "live_trackers")
 	require.Contains(t, loaded, "priorities")
 	require.Contains(t, loaded, "live_priorities")
 	duplicate := map[string]any{"workflow_id": "wf-1", "statuses": []any{map[string]any{"redmine_status_id": 1}, map[string]any{"redmine_status_id": 1}}}
@@ -703,6 +703,8 @@ func TestHandleAction_FieldMappingGet_NonAdminDerivesNamedCustomField(t *testing
 			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
 		case "/issue_statuses.json":
 			_, _ = w.Write([]byte(`{"issue_statuses":[]}`))
+		case "/trackers.json":
+			_, _ = w.Write([]byte(`{"trackers":[]}`))
 		case "/enumerations/issue_priorities.json":
 			_, _ = w.Write([]byte(`{"issue_priorities":[]}`))
 		case "/custom_fields.json":

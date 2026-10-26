@@ -33,6 +33,31 @@ type replySettings struct {
 	AuthorizedBy string `json:"authorized_by,omitempty"`
 }
 
+// Keep the original single-step fields readable by existing installations.
+type replyConfiguration struct {
+	replySettings
+	AdditionalSteps []replySettings `json:"additional_steps,omitempty"`
+}
+
+func (c replyConfiguration) all() []replySettings {
+	steps := append([]replySettings(nil), c.AdditionalSteps...)
+	if c.StepID != "" {
+		steps = append([]replySettings{c.replySettings}, steps...)
+	}
+	return steps
+}
+
+func (c replyConfiguration) forTask(task *pluginsdk.Task) (replySettings, bool) {
+	if task != nil {
+		for _, settings := range c.all() {
+			if settings.WorkflowID == task.WorkflowID && settings.StepID == task.WorkflowStepID {
+				return settings, true
+			}
+		}
+	}
+	return replySettings{}, false
+}
+
 type replyRequest struct {
 	ID                 string `json:"id"`
 	IssueID            int    `json:"issue_id"`
@@ -48,16 +73,16 @@ type replyRequest struct {
 	PublicationError   string `json:"publication_error,omitempty"`
 }
 
-func (p *redminePlugin) replySettings(ctx context.Context, workspaceID string) (replySettings, error) {
+func (p *redminePlugin) replySettings(ctx context.Context, workspaceID string) (replyConfiguration, error) {
 	value, _, err := p.Host().GetState(ctx, "workspace", workspaceID, replySettingsKey)
 	if err != nil {
-		return replySettings{}, err
+		return replyConfiguration{}, err
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return replySettings{}, err
+		return replyConfiguration{}, err
 	}
-	var settings replySettings
+	var settings replyConfiguration
 	err = json.Unmarshal(encoded, &settings)
 	return settings, err
 }
@@ -70,36 +95,32 @@ func (p *redminePlugin) handleReplySettings(ctx context.Context, req *pluginsdk.
 		}
 		return jsonResponse(settings)
 	}
-	settings, err := decodeBody[replySettings](req)
+	settings, err := decodeBody[replyConfiguration](req)
 	if err != nil {
 		return nil, err
 	}
-	// Policy identities come only from the authenticated settings action.
-	settings.PolicyID, settings.AuthorizedBy = "", ""
-	if settings.StepID != "" {
-		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`).MatchString(settings.PromptName) {
-			return classifiedErrorResponse(fmt.Errorf("redmine: choose a saved prompt name using letters, numbers, dots, underscores or hyphens"))
-		}
-		if _, err := p.validateReplyStep(ctx, req.Context.WorkspaceID, settings); err != nil {
-			return classifiedErrorResponse(err)
-		}
+	if len(settings.AdditionalSteps) > 19 {
+		return classifiedErrorResponse(fmt.Errorf("redmine: at most 20 communication steps are supported"))
 	}
-	if settings.AutoPublish {
-		if settings.StepID == "" || req.Context.ActorID == "" {
-			return classifiedErrorResponse(fmt.Errorf("redmine: automatic publishing requires an authenticated operator and a configured communication step"))
+	current, err := p.replySettings(ctx, req.Context.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	entries := []*replySettings{&settings.replySettings}
+	for i := range settings.AdditionalSteps {
+		entries = append(entries, &settings.AdditionalSteps[i])
+	}
+	for i, entry := range entries {
+		if i > 0 && entry.StepID == "" {
+			return classifiedErrorResponse(fmt.Errorf("redmine: choose a step for every additional communication entry"))
 		}
-		current, err := p.replySettings(ctx, req.Context.WorkspaceID)
-		if err != nil {
-			return nil, err
+		if entry.StepID != "" && seen[entry.StepID] {
+			return classifiedErrorResponse(fmt.Errorf("redmine: duplicate communication step"))
 		}
-		if current.AutoPublish && current.PolicyID != "" && current.AuthorizedBy != "" && current.WorkflowID == settings.WorkflowID && current.StepID == settings.StepID && current.PromptName == settings.PromptName {
-			settings.PolicyID, settings.AuthorizedBy = current.PolicyID, current.AuthorizedBy
-		} else {
-			var nonce [16]byte
-			if _, err := rand.Read(nonce[:]); err != nil {
-				return nil, err
-			}
-			settings.PolicyID, settings.AuthorizedBy = hex.EncodeToString(nonce[:]), req.Context.ActorID
+		seen[entry.StepID] = true
+		if err := p.authorizeReplySetting(ctx, req, entry, current); err != nil {
+			return classifiedErrorResponse(err)
 		}
 	}
 	encoded, _ := json.Marshal(settings)
@@ -109,6 +130,35 @@ func (p *redminePlugin) handleReplySettings(ctx context.Context, req *pluginsdk.
 		return nil, err
 	}
 	return jsonResponse(settings)
+}
+
+func (p *redminePlugin) authorizeReplySetting(ctx context.Context, req *pluginsdk.PluginActionRequest, settings *replySettings, current replyConfiguration) error {
+	// Policy identities come only from the authenticated settings action.
+	settings.PolicyID, settings.AuthorizedBy = "", ""
+	if settings.StepID != "" {
+		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`).MatchString(settings.PromptName) {
+			return fmt.Errorf("redmine: choose a saved prompt name using letters, numbers, dots, underscores or hyphens")
+		}
+		if _, err := p.validateReplyStep(ctx, req.Context.WorkspaceID, *settings); err != nil {
+			return err
+		}
+	}
+	if settings.AutoPublish {
+		if settings.StepID == "" || req.Context.ActorID == "" {
+			return fmt.Errorf("redmine: automatic publishing requires an authenticated operator and a configured communication step")
+		}
+		previous, _ := current.forTask(&pluginsdk.Task{WorkflowID: settings.WorkflowID, WorkflowStepID: settings.StepID})
+		if previous.AutoPublish && previous.PolicyID != "" && previous.AuthorizedBy != "" && previous.PromptName == settings.PromptName {
+			settings.PolicyID, settings.AuthorizedBy = previous.PolicyID, previous.AuthorizedBy
+		} else {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return err
+			}
+			settings.PolicyID, settings.AuthorizedBy = hex.EncodeToString(nonce[:]), req.Context.ActorID
+		}
+	}
+	return nil
 }
 
 func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID string, settings replySettings) (string, error) {
@@ -154,18 +204,19 @@ func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID strin
 func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, requestID string) (*replyRequest, error) {
 	p.commentMu.Lock()
 	defer p.commentMu.Unlock()
-	settings, err := p.replySettings(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	if settings.StepID == "" || strings.TrimSpace(requestID) == "" || len(requestID) > 200 {
-		return nil, fmt.Errorf("redmine: configure a communication step before requesting a draft")
-	}
-	profileID, err := p.validateReplyStep(ctx, workspaceID, settings)
+	configuration, err := p.replySettings(ctx, workspaceID)
 	if err != nil {
 		return nil, err
 	}
 	task, err := p.Host().Tasks().Get(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	settings, configured := configuration.forTask(task)
+	if !configured || strings.TrimSpace(requestID) == "" || len(requestID) > 200 {
+		return nil, fmt.Errorf("redmine: configure a communication step before requesting a draft")
+	}
+	profileID, err := p.validateReplyStep(ctx, workspaceID, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -315,14 +366,22 @@ func (p *redminePlugin) canRequestReply(ctx context.Context, workspaceID, taskID
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return false, err
 	}
-	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request)
+	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request, false)
 	return message != nil, err
 }
 
 // Completion is a native runtime fact, independent of whether the response is
 // a valid proposal, a refusal, or a request for missing evidence.
-func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, taskID string, request replyRequest) (*pluginsdk.Message, error) {
-	message, err := p.latestTaskMessage(ctx, taskID)
+func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, taskID string, request replyRequest, forPublication bool) (*pluginsdk.Message, error) {
+	if request.SessionID == "" || request.ProfileID == "" {
+		return nil, fmt.Errorf("redmine: the drafting session or profile is unavailable")
+	}
+	messageSessionID := request.SessionID
+	// A new stage checks the originating session; publishing still requires the latest task response.
+	if forPublication {
+		messageSessionID = ""
+	}
+	message, err := p.latestTaskMessage(ctx, taskID, messageSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +396,7 @@ func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, 
 	if !messageAt.After(requestedAt) {
 		return nil, nil
 	}
-	if request.SessionID == "" || request.ProfileID == "" || message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
+	if message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
 		return nil, fmt.Errorf("redmine: the final response does not match the drafting session")
 	}
 	sessions, info, err := p.Host().Sessions().List(ctx, pluginsdk.SessionFilter{TaskIDs: []string{taskID}, WorkspaceIDs: []string{workspaceID}}, pluginsdk.Page{Limit: 100})
@@ -355,7 +414,7 @@ func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, 
 		}
 		if s.ID == request.SessionID {
 			session = s
-		} else if s.State == "CREATED" || s.State == "STARTING" || s.State == "RUNNING" {
+		} else if (forPublication && s.State == "CREATED") || s.State == "STARTING" || s.State == "RUNNING" {
 			return nil, nil
 		}
 	}
@@ -423,7 +482,13 @@ func (p *redminePlugin) autoDraftReply(ctx context.Context, e *pluginsdk.Event, 
 	if err != nil {
 		return err
 	}
-	if settings.StepID == "" || stepID != settings.StepID {
+	configured := false
+	for _, entry := range settings.all() {
+		if entry.StepID == stepID {
+			configured = true
+		}
+	}
+	if !configured {
 		return nil
 	}
 	enabled, err := p.connectionSvc.GetEnabled(ctx, workspaceID)

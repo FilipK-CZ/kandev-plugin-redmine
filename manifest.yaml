@@ -5,7 +5,7 @@
 # every route kandev serves for this plugin (/api/plugins/<id>/...).
 id: "kandev-plugin-redmine"
 api_version: 1
-version: "0.4.1"
+version: "0.5.0"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
 author: "yattdev"
@@ -39,10 +39,8 @@ runtime:
 #   api_read: ["tasks", "workflows"] - tasks: reading the linked task's current
 #              state during sync/write-back. workflows: the field-mapping UI
 #              lists the connection's target workflow's steps
-#              (Workflows().List/.ListSteps) so status mappings pick a real
-#              step id rather than a free-text string (spec explicitly scopes
-#              one connection to one workflow — "Out of scope: mapping
-#              Redmine statuses across more than one Kandev workflow").
+#              (Workflows().List/.ListSteps) so mappings, tracker import routes,
+#              and communication steps pick real workspace-owned step IDs.
 #              messages: drafting and preview discovery. sessions/interactions:
 #              read-only completion checks before opt-in automatic publication.
 #   api_write: ["tasks"] - creating watcher tasks and updating already-linked

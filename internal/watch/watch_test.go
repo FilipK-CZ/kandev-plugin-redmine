@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/redmineclient"
 
@@ -296,6 +297,31 @@ func TestPoll_CreatesTaskInMappedWorkflowWithPriority(t *testing.T) {
 	require.Equal(t, "wf-secondary", host.creates[0].WorkflowID)
 	require.NotNil(t, host.creates[0].WorkflowStepID)
 	require.Equal(t, "step-triage", *host.creates[0].WorkflowStepID)
+}
+
+func TestTrackerRoutingOnlyChangesNewImportsAndRetainsDefaultForOtherTrackers(t *testing.T) {
+	host := newFakeHost()
+	svc := newWatchService(host)
+	w, err := svc.CreateWatch(context.Background(), Watch{WorkspaceID: "ws-1", WorkflowID: "wf-default", WorkflowStepID: "backlog", ProjectID: 1, Enabled: true})
+	require.NoError(t, err)
+	page := `{"issues":[{"id":42,"tracker":{"id":8}},{"id":43,"tracker":{"id":2}}],"total_count":2}`
+	issuesSvc := newIssuesService(t, func(out http.ResponseWriter, _ *http.Request) { _, _ = out.Write([]byte(page)) })
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	w.TrackerRoutes = []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "wf-bug", WorkflowStepID: "diagnosis"}}
+	page = `{"issues":[{"id":42,"tracker":{"id":8}},{"id":43,"tracker":{"id":2}},{"id":44,"tracker":{"id":8}},{"id":45,"tracker":{"id":2}}],"total_count":4}`
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 4)
+	for i, workflowID := range []string{"wf-default", "wf-default", "wf-bug", "wf-default"} {
+		require.Equal(t, workflowID, host.creates[i].WorkflowID)
+	}
+	require.Equal(t, "diagnosis", *host.creates[2].WorkflowStepID)
+	w.TrackerRoutes = nil
+	page = `{"issues":[{"id":46,"tracker":{"id":8}}],"total_count":1}`
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 5)
+	require.Equal(t, "wf-default", host.creates[4].WorkflowID, "removing an override restores the default for future imports")
+	require.Equal(t, "backlog", *host.creates[4].WorkflowStepID)
 }
 
 func TestPoll_AlreadySeenIssue_CreatesNoSecondTask(t *testing.T) {

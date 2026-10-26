@@ -64,7 +64,13 @@ func (r replyMessages) List(_ context.Context, filter pluginsdk.MessageFilter, _
 	if len(filter.TaskIDs) != 1 || filter.TaskIDs[0] != "task-1" {
 		return nil, nil, fmt.Errorf("unexpected message scope")
 	}
-	return append([]pluginsdk.Message(nil), r.host.messages...), nil, nil
+	var messages []pluginsdk.Message
+	for _, message := range r.host.messages {
+		if len(filter.SessionIDs) == 0 || (len(filter.SessionIDs) == 1 && message.SessionID == filter.SessionIDs[0]) {
+			messages = append(messages, message)
+		}
+	}
+	return messages, nil, nil
 }
 func (r replyMessages) Send(_ context.Context, taskID, sessionID, text string) (*pluginsdk.MessageDispatch, error) {
 	r.host.mu.Lock()
@@ -77,7 +83,7 @@ func (r replyMessages) Send(_ context.Context, taskID, sessionID, text string) (
 	if r.host.sendErr != nil {
 		return nil, r.host.sendErr
 	}
-	r.host.messages = append(r.host.messages, pluginsdk.Message{ID: "request", TaskID: taskID, AuthorType: "user", Type: "message", Content: text, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	r.host.messages = append(r.host.messages, pluginsdk.Message{ID: "request", SessionID: sessionID, TaskID: taskID, AuthorType: "user", Type: "message", Content: text, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	return &pluginsdk.MessageDispatch{SessionID: sessionID, Status: "queued"}, nil
 }
 

@@ -394,7 +394,7 @@ func (p *redminePlugin) handleCommentGet(ctx context.Context, req *pluginsdk.Plu
 }
 
 func (p *redminePlugin) latestCommentProposal(ctx context.Context, taskID string, issueID int) (*commentProposal, string) {
-	last, err := p.latestTaskMessage(ctx, taskID)
+	last, err := p.latestTaskMessage(ctx, taskID, "")
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -408,16 +408,20 @@ func (p *redminePlugin) latestCommentProposal(ctx context.Context, taskID string
 	return proposal, ""
 }
 
-func (p *redminePlugin) latestTaskMessage(ctx context.Context, taskID string) (*pluginsdk.Message, error) {
+func (p *redminePlugin) latestTaskMessage(ctx context.Context, taskID, sessionID string) (*pluginsdk.Message, error) {
 	var last *pluginsdk.Message
 	page := pluginsdk.Page{Limit: 100}
+	filter := pluginsdk.MessageFilter{TaskIDs: []string{taskID}, Types: []string{"message"}}
+	if sessionID != "" {
+		filter.SessionIDs = []string{sessionID}
+	}
 	for n := 0; n < 10; n++ {
-		messages, info, err := p.Host().Messages().List(ctx, pluginsdk.MessageFilter{TaskIDs: []string{taskID}, Types: []string{"message"}}, page)
+		messages, info, err := p.Host().Messages().List(ctx, filter, page)
 		if err != nil {
 			return nil, fmt.Errorf("draft discovery is unavailable; copy the proposed reply manually")
 		}
 		for i := range messages {
-			if messages[i].TaskID == taskID && messages[i].Type == "message" {
+			if messages[i].TaskID == taskID && messages[i].Type == "message" && (sessionID == "" || messages[i].SessionID == sessionID) {
 				value := messages[i]
 				last = &value
 			}

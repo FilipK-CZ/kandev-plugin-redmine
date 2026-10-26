@@ -312,6 +312,8 @@ func (p *redminePlugin) handleProjectsSave(ctx context.Context, req *pluginsdk.P
 // --- fieldmapping.* -------------------------------------------------------
 
 type fieldMappingGetResponse struct {
+	TrackerRoutes       []fieldmapping.TrackerRoute    `json:"tracker_routes"`
+	LiveTrackers        []redmineclient.Tracker        `json:"live_trackers"`
 	WorkflowID          string                         `json:"workflow_id"`
 	Statuses            []fieldmapping.StatusMapping   `json:"statuses"`
 	Priorities          []fieldmapping.PriorityMapping `json:"priorities"`
@@ -350,8 +352,13 @@ func (p *redminePlugin) handleFieldMappingGet(ctx context.Context, req *pluginsd
 	if err != nil {
 		return nil, err
 	}
+	trackers, err := client.ListTrackers(ctx)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
 
 	return jsonResponse(fieldMappingGetResponse{
+		TrackerRoutes: mapping.TrackerRoutes, LiveTrackers: trackers,
 		WorkflowID: mapping.WorkflowID,
 		Statuses:   mapping.Statuses, Priorities: mapping.Priorities,
 		LiveStatuses:        toNamedRefs(liveStatuses),
@@ -408,6 +415,9 @@ func (p *redminePlugin) handleFieldMappingSave(ctx context.Context, req *plugins
 		return classifiedErrorResponse(err)
 	}
 	if err := p.normalizeAndValidateMapping(ctx, client, &body); err != nil {
+		return classifiedErrorResponse(err)
+	}
+	if err := p.validateTrackerRoutes(ctx, req.Context.WorkspaceID, client, body.TrackerRoutes); err != nil {
 		return classifiedErrorResponse(err)
 	}
 	if err := p.fieldmappingSvc.Save(ctx, req.Context.WorkspaceID, body); err != nil {

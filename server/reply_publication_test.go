@@ -20,6 +20,7 @@ type automaticReplyHost struct {
 	sessionProfile string
 	pending        bool
 	pendingErr     error
+	extraSessions  []pluginsdk.Session
 }
 
 func (h *automaticReplyHost) Sessions() pluginsdk.SessionReader { return automaticSessions{host: h} }
@@ -39,7 +40,7 @@ func (r automaticSessions) List(_ context.Context, filter pluginsdk.SessionFilte
 	if len(filter.TaskIDs) != 1 || filter.TaskIDs[0] != "task-1" || len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" {
 		return nil, nil, fmt.Errorf("unexpected session scope")
 	}
-	return []pluginsdk.Session{{ID: "draft-session", TaskID: "task-1", AgentProfileID: r.host.sessionProfile, State: r.host.sessionState, StartedAt: "2026-10-26T12:00:00Z"}}, nil, nil
+	return append([]pluginsdk.Session{{ID: "draft-session", TaskID: "task-1", AgentProfileID: r.host.sessionProfile, State: r.host.sessionState, StartedAt: "2026-10-26T12:00:00Z"}}, r.host.extraSessions...), nil, nil
 }
 
 type automaticInteractions struct {
@@ -66,12 +67,15 @@ type automaticTasks struct {
 }
 
 func (r automaticTasks) List(ctx context.Context, filter pluginsdk.TaskFilter, _ pluginsdk.Page) ([]pluginsdk.Task, *pluginsdk.PageInfo, error) {
-	if len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" || len(filter.WorkflowIDs) != 1 || filter.WorkflowIDs[0] != "wf-1" {
+	if len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" || len(filter.WorkflowIDs) != 1 {
 		return nil, nil, fmt.Errorf("unexpected task scope")
 	}
 	task, err := r.TaskReader.Get(ctx, "task-1")
 	if err != nil {
 		return nil, nil, err
+	}
+	if task.WorkflowID != filter.WorkflowIDs[0] {
+		return nil, nil, fmt.Errorf("unexpected workflow scope")
 	}
 	return []pluginsdk.Task{*task}, nil, nil
 }
@@ -102,7 +106,7 @@ func finishAutomaticDraft(t *testing.T, p *redminePlugin, h *automaticReplyHost,
 	body, err := json.Marshal(commentProposal{IssueID: 42, RequestID: hex.EncodeToString(hash[:]), Notes: "Completed client reply.", PrivateNotes: &private})
 	require.NoError(t, err)
 	h.mu.Lock()
-	h.messages = append(h.messages, pluginsdk.Message{ID: "final-reply", SessionID: "draft-session", TaskID: "task-1", TurnID: "completed-turn", Type: "message", AuthorType: "agent", Content: "```redmine-comment\n" + string(body) + "\n```", CreatedAt: time.Now().Add(time.Second).UTC().Format(time.RFC3339Nano)})
+	h.messages = append(h.messages, pluginsdk.Message{ID: "final-reply", SessionID: value["session_id"].(string), TaskID: "task-1", TurnID: "completed-turn", Type: "message", AuthorType: "agent", Content: "```redmine-comment\n" + string(body) + "\n```", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	h.mu.Unlock()
 }
 
@@ -204,6 +208,9 @@ func TestAutomaticRepliesRequireCurrentAuthorityAndExactFinalDraft(t *testing.T)
 		},
 		"wrong-session": func(_ *testing.T, _ *redminePlugin, h *automaticReplyHost, _ *commentFixture) {
 			h.messages[len(h.messages)-1].SessionID = "another-session"
+		},
+		"newer-other-session-output": func(_ *testing.T, _ *redminePlugin, h *automaticReplyHost, _ *commentFixture) {
+			h.messages = append(h.messages, pluginsdk.Message{ID: "other-output", SessionID: "another-session", TaskID: "task-1", TurnID: "other-turn", AuthorType: "agent", Type: "message", Content: "Further task work.", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 		},
 		"missing-turn": func(_ *testing.T, _ *redminePlugin, h *automaticReplyHost, _ *commentFixture) {
 			h.messages[len(h.messages)-1].TurnID = ""

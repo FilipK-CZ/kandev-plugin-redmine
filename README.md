@@ -6,7 +6,8 @@ ways, and watch for new issues. Bootstrapped from
 `kandev-plugin-template`; the authoritative plugin specification and
 verification trace is [docs/spec.md](docs/spec.md).
 
-This fork adds [review-gated client replies](docs/client-replies.md). It keeps
+This fork adds [review-gated client replies](docs/client-replies.md) and
+[workflow routing by tracker](docs/tracker-workflows.md). It keeps
 the original plugin ID and connection/state format for an in-place upgrade.
 Reply generation is disabled until a workflow step is configured. Publication
 requires human approval by default; an explicit workspace switch enables
@@ -36,7 +37,7 @@ automatic publication of new, verified draft responses.
   contract does not allow plugins to mutate Kandev labels.
 - **Issue read/write** — always sends `status_id=*` (Redmine defaults to
   open-only), with attachments via the two-step upload-token flow.
-- **Client replies** — a configurable read-only workflow step receives fresh
+- **Client replies** — configurable read-only communication steps receive fresh
   public issue history and drafts a reply using a saved Kandev prompt. The
   task menu's **Review Redmine reply** opens the proposal for editing and
   explicit approval. Comment publication changes only `notes` and
