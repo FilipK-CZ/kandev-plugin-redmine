@@ -197,6 +197,111 @@ function makeSetRedmineStatusAction(host) {
   };
 }
 
+function makeRedmineCommentAction(host) {
+  const h = host.jsx;
+  const differsFrom = (proposal, receipt) => proposal && (proposal.notes !== receipt?.notes || proposal.private_notes !== receipt?.private_notes);
+  return {
+    id: "redmine-comment", label: "Review Redmine reply", group: "primary", singleTaskOnly: true,
+    async run(context) {
+      try {
+        const initial = await taskActionInvoke(host, "comments.get", context, {});
+        const previousPublication = initial.draft?.state === "published" ? initial.draft : null;
+        const freshProposal = previousPublication && differsFrom(initial.proposal, previousPublication);
+        const editorSource = freshProposal ? initial.proposal : initial.draft || initial.proposal;
+        const closeRef = {};
+        function CommentModal() {
+          const React = host.React;
+          const { Button, Textarea, Label, Badge } = host.ui;
+          const [view, setView] = React.useState(initial);
+          const [receipt, setReceipt] = React.useState(previousPublication);
+          const [review, setReview] = React.useState(freshProposal || (initial.draft?.state === "prepared" && !initial.can_approve) ? null : initial.draft);
+          const [currentID, setCurrentID] = React.useState(initial.current_id || "");
+          const [issue, setIssue] = React.useState(initial.issue);
+          const [contextHash, setContextHash] = React.useState(initial.context_hash);
+          const [notes, setNotes] = React.useState(editorSource?.notes || "");
+          const [visibility, setVisibility] = React.useState(editorSource ? (editorSource.private_notes ? "private" : "public") : "");
+          const [error, setError] = React.useState(null);
+          const [busy, setBusy] = React.useState(false);
+          const [uncertain, setUncertain] = React.useState(false);
+          const [draftRequested, setDraftRequested] = React.useState(false);
+          const inFlight = React.useRef(false);
+          const run = async (action) => {
+            if (inFlight.current) return;
+            inFlight.current = true; setBusy(true); setError(null);
+            try { await action(); }
+            catch (err) { setError(err.message || String(err)); }
+            finally { inFlight.current = false; setBusy(false); }
+          };
+          const prepare = () => run(async () => {
+            const value = await taskActionInvoke(host, "comments.prepare", context, { issue_id: issue.id, notes, private_notes: visibility === "private", expected_id: currentID, expected_context_hash: contextHash });
+            setReview(value); setCurrentID(value.id); setUncertain(false);
+          });
+          const publish = () => run(async () => {
+            setUncertain(true);
+            const value = await taskActionInvoke(host, "comments.approve", context, { draft_id: review.id });
+            setReview(value); setUncertain(false);
+          });
+          const requestDraft = () => run(async () => {
+            const result = await taskActionInvoke(host, "replies.request", context, { request_id: globalThis.crypto.randomUUID() });
+            setDraftRequested(result.state !== "denied");
+            setError(result.state === "denied" ? "Draft request denied. Grant the plugin workspace message access before trying again." : result.state === "uncertain" ? "Draft dispatch is unconfirmed. Inspect the native task; do not repeat the request." : "Draft requested. Check the task conversation, then reopen Review Redmine reply to load it.");
+          });
+          const reconcile = () => run(async () => {
+            const value = await taskActionInvoke(host, "comments.reconcile", context, { draft_id: review.id });
+            setReview(value); setUncertain(false);
+          });
+          const edit = () => run(async () => {
+            const latest = await taskActionInvoke(host, "comments.get", context, {});
+            if (review?.state === "prepared") await taskActionInvoke(host, "comments.discard", context, { draft_id: review.id });
+            if (review?.state === "published") {
+              const published = latest.draft?.state === "published" ? latest.draft : review;
+              const proposal = differsFrom(latest.proposal, published) ? latest.proposal : null;
+              setReceipt(published); setNotes(proposal?.notes || ""); setVisibility(proposal ? (proposal.private_notes ? "private" : "public") : "");
+            }
+            setView(latest);
+            setIssue(latest.issue); setContextHash(latest.context_hash); setCurrentID(latest.current_id || "");
+            setReview(null); setUncertain(false);
+          });
+          const pending = uncertain || review?.state === "sending" || review?.state === "unverified";
+          return h("div", { className: "space-y-4", "data-testid": "redmine-comment-modal" },
+            h("a", { href: review?.issue_url || issue.url, target: "_blank", rel: "noopener noreferrer", className: "font-medium underline" }, `#${issue.id} · ${review?.subject || issue.subject}`),
+            h("p", { className: "text-sm text-muted-foreground" }, "Review the exact text and visibility. Only approval below publishes it; status and other issue fields stay unchanged."),
+            view.draft_warning ? h("p", { className: "text-sm text-muted-foreground" }, view.draft_warning) : null,
+            view.draft_request_warning ? h("p", { className: "text-sm text-muted-foreground" }, `Draft generation: ${view.draft_request_warning}`) : null,
+            view.draft_request?.publication_error ? h("p", { role: "alert", "data-testid": "redmine-reply-publication-error" }, `Automatic publication needs review: ${view.draft_request.publication_error}`) : null,
+            receipt && receipt.id !== review?.id ? h("details", { className: "rounded border p-3", "data-testid": "redmine-comment-previous-publication" },
+              h("summary", { className: "cursor-pointer text-sm" }, `Previously published · journal #${receipt.journal_id} · ${receipt.private_notes ? "Private note" : "Public comment"}`),
+              h("div", { className: "whitespace-pre-wrap break-words pt-2", "data-testid": "redmine-comment-previous-text" }, receipt.notes)) : null,
+            !review ? h("div", { className: "space-y-3" },
+              h(Button, { variant: "outline", disabled: busy || draftRequested || view.can_request_draft !== true, onClick: requestDraft, "data-testid": "redmine-reply-request" }, "Generate from current issue"),
+              h(Label, { htmlFor: "redmine-comment-notes" }, "Proposed reply"),
+              h(Textarea, { id: "redmine-comment-notes", "data-testid": "redmine-comment-notes", value: notes, maxLength: 32768, rows: 10, disabled: busy, onChange: event => setNotes(event.target.value) }),
+              h(Label, { htmlFor: "redmine-comment-visibility" }, "Visibility"),
+              h("select", { id: "redmine-comment-visibility", value: visibility, disabled: busy, onChange: event => setVisibility(event.target.value), className: "border rounded px-3 py-2 w-full" },
+                h("option", { value: "" }, "Choose visibility"), h("option", { value: "public" }, "Public comment — visible to the client"), h("option", { value: "private" }, "Private internal note")),
+              h(Button, { disabled: busy || !notes.trim() || !visibility, onClick: prepare, "data-testid": "redmine-comment-preview" }, "Review exact comment"),
+            ) : h("div", { className: "space-y-3" },
+              h(Badge, { variant: review.private_notes ? "secondary" : "default", "data-testid": "redmine-comment-visibility-badge" }, review.private_notes ? "Private internal note" : "Public — visible to the client"),
+              h("div", { className: "whitespace-pre-wrap break-words rounded border p-3", "data-testid": "redmine-comment-preview-text" }, review.notes),
+              review.state === "published" ? h("p", { "data-testid": "redmine-comment-published" }, `${review.policy_id ? "Published automatically and verified" : "Published and verified"} · journal #${review.journal_id}`) : null,
+              review.state === "rejected" ? h("p", { role: "alert" }, "Redmine rejected the comment. Review access and prepare a new preview; it will not retry automatically.") : null,
+              pending ? h("div", null,
+                h("p", { role: "alert" }, "Publication is not confirmed. Check the result; do not create or send another comment."),
+                h(Button, { disabled: busy, onClick: reconcile, "data-testid": "redmine-comment-reconcile" }, "Check publication result")) : null,
+              review.state === "prepared" && !pending ? h(Button, { disabled: busy, onClick: publish, "data-testid": "redmine-comment-approve" }, review.private_notes ? "Approve and publish private note" : "Approve and publish public comment") : null,
+              !pending ? h(Button, { variant: "outline", disabled: busy, onClick: edit, "data-testid": "redmine-comment-edit" }, review.state === "published" ? "New comment" : "Edit and review again") : null,
+            ),
+            error ? h("p", { role: "alert", "data-testid": "redmine-comment-error" }, error) : null,
+            h(Button, { variant: "outline", onClick: () => closeRef.close?.() }, "Close"),
+          );
+        }
+        const handle = host.openModal({ title: "Review Redmine reply", size: "lg", content: CommentModal });
+        closeRef.close = handle.close;
+      } catch (err) { host.toast.error(err.message || String(err)); }
+    },
+  };
+}
+
 function makeUnlinkRedmineAction(host) {
   const h = host.jsx;
   return {
@@ -767,6 +872,53 @@ function makeSettingsComponent(host) {
   }
 
   // -- Watchers --------------------------------------------------------
+  function ReplyDraftingSection({ workspaceId, connected }) {
+    const React = host.React;
+    const currentWorkspace = React.useRef(workspaceId);
+    currentWorkspace.current = workspaceId;
+    const [settings, setSettings] = React.useState({ workflow_id: "", step_id: "", prompt_name: "client-reply", auto_publish: false });
+    const [workflows, setWorkflows] = React.useState([]);
+    const [loading, setLoading] = React.useState(true);
+    const [saving, setSaving] = React.useState(false);
+    const [error, setError] = React.useState(null);
+    React.useEffect(() => {
+      let active = true;
+      setLoading(true); setSaving(false); setError(null);
+      if (!connected) { setLoading(false); return () => { active = false; }; }
+      Promise.all([invoke("replies.settings.get", workspaceId, {}), invoke("workflows.list", workspaceId, {})]).then(([saved, options]) => {
+        if (active) { setSettings({ ...saved, prompt_name: saved.prompt_name || "client-reply", auto_publish: saved.auto_publish === true }); setWorkflows(options.workflows || []); }
+      }).catch(err => { if (active) setError(errorMessage(err)); }).finally(() => { if (active) setLoading(false); });
+      return () => { active = false; };
+    }, [workspaceId, connected]);
+    const save = async () => {
+      setSaving(true); setError(null);
+      try { const saved = await invoke("replies.settings.save", workspaceId, settings); if (currentWorkspace.current === workspaceId) { setSettings(saved); toast.success(saved.auto_publish ? "Automatic publishing enabled for new draft requests." : "Reply drafting saved. Publishing requires human approval."); } }
+      catch (err) { if (currentWorkspace.current === workspaceId) setError(errorMessage(err)); }
+      finally { if (currentWorkspace.current === workspaceId) setSaving(false); }
+    };
+    const steps = workflows.find(workflow => workflow.id === settings.workflow_id)?.steps || [];
+    return h(Card, { id: "redmine-reply-settings" },
+      h(CardHeader, null, h(CardTitle, null, "Client replies"), h(CardDescription, null, "Entering this step sends live public issue history to its read-only agent. Choose whether completed replies require human approval or are published automatically.")),
+      h(CardContent, { className: "space-y-3" },
+        h(Label, { htmlFor: "redmine-reply-workflow" }, "Drafting workflow"),
+        h(Select, { disabled: !connected || loading || saving, value: settings.workflow_id || "__none__", onValueChange: value => setSettings({ ...settings, workflow_id: value === "__none__" ? "" : value, step_id: "", auto_publish: false }) },
+          h(SelectTrigger, { id: "redmine-reply-workflow" }, h(SelectValue, { placeholder: "Choose workflow" })),
+          h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Disabled"), workflows.map(workflow => h(SelectItem, { key: workflow.id, value: workflow.id }, workflow.name)))),
+        h(Label, { htmlFor: "redmine-reply-step" }, "Communication step"),
+        h(Select, { disabled: !connected || loading || saving || !settings.workflow_id, value: settings.step_id || "__none__", onValueChange: value => setSettings({ ...settings, step_id: value === "__none__" ? "" : value, auto_publish: value === "__none__" ? false : settings.auto_publish }) },
+          h(SelectTrigger, { id: "redmine-reply-step" }, h(SelectValue, { placeholder: "Choose step" })),
+          h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Disabled"), steps.map(step => h(SelectItem, { key: step.id, value: step.id }, step.name)))),
+        h(Label, { htmlFor: "redmine-reply-prompt" }, "Saved prompt name"),
+        h(Input, { id: "redmine-reply-prompt", value: settings.prompt_name, disabled: !connected || loading || saving, onChange: event => setSettings({ ...settings, prompt_name: event.target.value }) }),
+        h("div", { className: "flex items-center justify-between gap-4" },
+          h(Label, { htmlFor: "redmine-reply-auto-publish" }, "Publish replies automatically"),
+          h(Switch, { id: "redmine-reply-auto-publish", "data-testid": "redmine-reply-auto-publish", "aria-describedby": "redmine-reply-mode-description", checked: settings.auto_publish === true, disabled: !connected || loading || saving || !settings.step_id, onCheckedChange: checked => setSettings({ ...settings, auto_publish: checked }) })),
+        h("p", { id: "redmine-reply-mode-description", role: settings.auto_publish ? "alert" : undefined, className: "text-sm text-muted-foreground" }, settings.auto_publish ? "After saving, new completed replies can publish public comments or private notes without human approval. Existing drafts are not sent. Turning this off stops new automatic submissions; a comment already being submitted cannot be recalled." : "Human approval required (default). Every comment needs an exact preview and explicit approval in the task menu."),
+        h("p", { className: "text-sm text-muted-foreground" }, "Use a fixed read-only profile, disable native auto-start and automatic transitions, and leave this step unmapped from Redmine status write-back. The plugin owns the single draft request. Empty step disables drafting."),
+        error ? h("p", { role: "alert" }, error) : null),
+      h(CardFooter, null, h(Button, { disabled: !connected || loading || saving, onClick: save, "data-testid": "redmine-reply-save" }, "Save reply drafting")));
+  }
+
   function WatchersSection({ workspaceId, connected }) {
     const React = host.React;
     const [watches, setWatches] = React.useState([]);
@@ -1026,6 +1178,7 @@ function makeSettingsComponent(host) {
       h(ProjectsSection, { workspaceId, connected }),
       h(FieldMappingSection, { workspaceId, connected }),
       h(SyncOptionsSection, { workspaceId, connected }),
+      h(ReplyDraftingSection, { workspaceId, connected }),
       h(WatchersSection, { workspaceId, connected }),
     );
   };
@@ -1039,6 +1192,7 @@ window.registerKandevPlugin("kandev-plugin-redmine", {
     const redmineIcon = makeRedmineIcon(host);
     registry.registerTaskAction(makeLinkTaskAction(host));
     registry.registerTaskMenuAction(makeSetRedmineStatusAction(host));
+    registry.registerTaskMenuAction(makeRedmineCommentAction(host));
     registry.registerTaskMenuAction(makeUnlinkRedmineAction(host));
     registry.registerIntegrationSettings({
       id: "redmine",

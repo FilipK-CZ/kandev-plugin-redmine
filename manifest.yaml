@@ -5,12 +5,12 @@
 # every route kandev serves for this plugin (/api/plugins/<id>/...).
 id: "kandev-plugin-redmine"
 api_version: 1
-version: "0.3.2"
+version: "0.4.0"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
 author: "yattdev"
 categories: ["connector"]
-repo_url: "https://github.com/yattdev/kandev-plugin-redmine"
+repo_url: "https://github.com/FilipK-CZ/kandev-plugin-redmine"
 
 # First upstream release carrying the provider-neutral task
 # priority/workflow-step contract from kdlbs/kandev#2872. Verified against
@@ -43,6 +43,8 @@ runtime:
 #              step id rather than a free-text string (spec explicitly scopes
 #              one connection to one workflow — "Out of scope: mapping
 #              Redmine statuses across more than one Kandev workflow").
+#              messages: drafting and preview discovery. sessions/interactions:
+#              read-only completion checks before opt-in automatic publication.
 #   api_write: ["tasks"] - creating watcher tasks and updating already-linked
 #              tasks during sync/write-back. Task linking itself is
 #              plugin-owned state (Tasks().Update has no metadata field to
@@ -60,8 +62,8 @@ runtime:
 capabilities:
   state: true
   secrets: true
-  api_read: ["tasks", "workflows"]
-  api_write: ["tasks"]
+  api_read: ["tasks", "workflows", "messages", "sessions", "interactions"]
+  api_write: ["tasks", "messages"]
   events: ["task.moved", "task.deleted", "workspace.deleted"]
 
 # actions: the plugin's own native settings UI calls these via
@@ -85,6 +87,14 @@ actions:
   - { key: "issues.create", scope: "workspace", max_body_bytes: 65536 }
   - { key: "issues.update", scope: "workspace", max_body_bytes: 65536 }
   - { key: "issues.upload", scope: "workspace", max_body_bytes: 1048576 }
+  - { key: "comments.get", scope: "task", max_body_bytes: 8192 }
+  - { key: "comments.prepare", scope: "task", max_body_bytes: 65536 }
+  - { key: "comments.approve", scope: "task", max_body_bytes: 8192 }
+  - { key: "comments.reconcile", scope: "task", max_body_bytes: 8192 }
+  - { key: "comments.discard", scope: "task", max_body_bytes: 8192 }
+  - { key: "replies.settings.get", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "replies.settings.save", scope: "workspace", max_body_bytes: 8192 }
+  - { key: "replies.request", scope: "task", max_body_bytes: 8192 }
   - { key: "link.get", scope: "task", max_body_bytes: 8192 }
   - { key: "link.set", scope: "task", max_body_bytes: 8192 }
   - { key: "link.unset", scope: "task", max_body_bytes: 8192 }

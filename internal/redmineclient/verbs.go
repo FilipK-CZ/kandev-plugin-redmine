@@ -38,17 +38,23 @@ func (c *Client) GetJSONValues(ctx context.Context, path string, query url.Value
 // PostJSON performs an authenticated POST with a JSON-encoded body, decoding
 // the JSON response into out (pass nil to skip decoding).
 func (c *Client) PostJSON(ctx context.Context, path string, body, out any) error {
-	return c.doWithJSONBody(ctx, http.MethodPost, path, body, out)
+	return c.doWithJSONBody(ctx, http.MethodPost, path, body, out, true)
 }
 
 // PutJSON performs an authenticated PUT with a JSON-encoded body, decoding
 // the JSON response into out (pass nil to skip decoding — Redmine typically
 // answers a successful PUT with an empty body).
 func (c *Client) PutJSON(ctx context.Context, path string, body, out any) error {
-	return c.doWithJSONBody(ctx, http.MethodPut, path, body, out)
+	return c.doWithJSONBody(ctx, http.MethodPut, path, body, out, true)
 }
 
-func (c *Client) doWithJSONBody(ctx context.Context, method, path string, body, out any) error {
+// PutJSONOnce is for append operations such as journal notes: replaying a PUT
+// after a lost acknowledgement could append the same comment twice.
+func (c *Client) PutJSONOnce(ctx context.Context, path string, body, out any) error {
+	return c.doWithJSONBody(ctx, http.MethodPut, path, body, out, false)
+}
+
+func (c *Client) doWithJSONBody(ctx context.Context, method, path string, body, out any, replayable bool) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("redmineclient: encoding request body: %w", err)
@@ -56,6 +62,9 @@ func (c *Client) doWithJSONBody(ctx context.Context, method, path string, body, 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(encoded))
 	if err != nil {
 		return fmt.Errorf("redmineclient: building request: %w", err)
+	}
+	if !replayable {
+		req.GetBody = nil
 	}
 	req.Header.Set("X-Redmine-API-Key", c.apiKey)
 	req.Header.Set("Accept", "application/json")

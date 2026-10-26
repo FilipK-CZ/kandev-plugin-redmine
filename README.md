@@ -6,6 +6,12 @@ ways, and watch for new issues. Bootstrapped from
 `kandev-plugin-template`; the authoritative plugin specification and
 verification trace is [docs/spec.md](docs/spec.md).
 
+This fork adds [review-gated client replies](docs/client-replies.md). It keeps
+the original plugin ID and connection/state format for an in-place upgrade.
+Reply generation is disabled until a workflow step is configured. Publication
+requires human approval by default; an explicit workspace switch enables
+automatic publication of new, verified draft responses.
+
 - **Connection** — API-key auth (`X-Redmine-API-Key`) only, one connection per
   kandev workspace, validated against `GET /users/current.json`. The key is
   passed as plaintext only to the SDK's host-managed encrypted secret store.
@@ -30,6 +36,14 @@ verification trace is [docs/spec.md](docs/spec.md).
   contract does not allow plugins to mutate Kandev labels.
 - **Issue read/write** — always sends `status_id=*` (Redmine defaults to
   open-only), with attachments via the two-step upload-token flow.
+- **Client replies** — a configurable read-only workflow step receives fresh
+  public issue history and drafts a reply using a saved Kandev prompt. The
+  task menu's **Review Redmine reply** opens the proposal for editing and
+  explicit approval. Comment publication changes only `notes` and
+  `private_notes`, verifies the resulting journal, and never retries an
+  uncertain append. A workspace switch can publish new verified drafts
+  automatically; human approval remains the default. Normal issue-field updates
+  keep their existing behavior.
 - **Task linking** — `registerTaskAction({placement:"link"})` +
   `host.openTaskLinkDialog`, the same shared native Link surface GitHub/
   Bitbucket use.

@@ -36,6 +36,12 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 	if req == nil {
 		return nil, fmt.Errorf("redmine: missing action request")
 	}
+	// Keep link/connection changes from racing a reviewed publication.
+	switch req.ActionKey {
+	case "connection.save", "connection.disconnect", "projects.save", "integration.enabled.save", "link.set", "link.unset", "replies.settings.save":
+		p.commentMu.Lock()
+		defer p.commentMu.Unlock()
+	}
 	switch req.ActionKey {
 	case "connection.get":
 		return p.handleConnectionGet(ctx, req)
@@ -67,6 +73,22 @@ func (p *redminePlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginA
 		return p.handleIssueUpdate(ctx, req)
 	case "issues.upload":
 		return p.handleIssueUpload(ctx, req)
+	case "comments.get":
+		return p.handleCommentGet(ctx, req)
+	case "comments.prepare":
+		return p.handleCommentPrepare(ctx, req)
+	case "comments.approve":
+		return p.handleCommentPublish(ctx, req, true)
+	case "comments.reconcile":
+		return p.handleCommentPublish(ctx, req, false)
+	case "comments.discard":
+		return p.handleCommentDiscard(ctx, req)
+	case "replies.settings.get":
+		return p.handleReplySettings(ctx, req, false)
+	case "replies.settings.save":
+		return p.handleReplySettings(ctx, req, true)
+	case "replies.request":
+		return p.handleReplyRequest(ctx, req)
 	case "link.get":
 		return p.handleLinkGet(ctx, req)
 	case "link.set":

@@ -40,9 +40,13 @@ type CustomFieldValue struct {
 }
 
 type Journal struct {
-	ID        int    `json:"id"`
-	Notes     string `json:"notes"`
-	CreatedOn string `json:"created_on"`
+	ID           int    `json:"id"`
+	Notes        string `json:"notes"`
+	CreatedOn    string `json:"created_on"`
+	PrivateNotes bool   `json:"private_notes"`
+	User         struct {
+		ID int `json:"id"`
+	} `json:"user"`
 }
 
 type Attachment struct {
@@ -121,6 +125,14 @@ func (s *Service) GetIssue(ctx context.Context, id int) (*Issue, error) {
 	}
 	issue := out.Issue.toIssue(s.client.BaseURL())
 	return &issue, nil
+}
+
+// AddComment changes only the journal; field updates and their safe retries
+// continue through UpdateIssueFields.
+func (s *Service) AddComment(ctx context.Context, id int, notes string, private bool) error {
+	return s.client.PutJSONOnce(ctx, fmt.Sprintf("/issues/%d.json", id), map[string]any{
+		"issue": map[string]any{"notes": notes, "private_notes": private},
+	}, nil)
 }
 
 // ListIssuesParams filters one page of /issues.json.

@@ -31,8 +31,8 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// defaultSyncPollInterval is the production inbound-sync cadence. Outbound
-// status changes are sent only by the task.moved event path or the manual
+// defaultSyncPollInterval is the inbound-sync and opt-in reply-publication cadence.
+// Outbound status changes are sent only by the task.moved event path or the manual
 // status action. The environment override exists for deterministic packaged
 // integration tests; invalid or sub-second values retain the safe default.
 const defaultSyncPollInterval = 60 * time.Second
@@ -48,13 +48,14 @@ func configuredSyncPollInterval() time.Duration {
 type redminePlugin struct {
 	pluginsdk.UnimplementedPlugin
 
-	mu       sync.Mutex
-	ready    bool
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
-	stopDone chan struct{}
-	pollNow  chan struct{}
+	mu        sync.Mutex
+	commentMu sync.Mutex
+	ready     bool
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stopDone  chan struct{}
+	pollNow   chan struct{}
 
 	connectionSvc   *connection.Service
 	projectsSvc     *projects.Service
@@ -193,6 +194,9 @@ func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) e
 		return nil // not connected (or credentials rejected) - nothing to poll
 	}
 	issuesSvc := issues.New(client)
+	if err := p.pollReplies(ctx, workspaceID); err != nil {
+		log.Printf("redmine: reply publication for workspace %s: %v", workspaceID, err)
+	}
 
 	if err := p.pollSync(ctx, workspaceID, issuesSvc); err != nil {
 		return err
@@ -214,6 +218,13 @@ func (p *redminePlugin) pollSync(ctx context.Context, workspaceID string, issues
 	opts, err := p.syncSvc.GetOptions(ctx, workspaceID)
 	if err != nil {
 		return err
+	}
+	replies, err := p.replySettings(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if replies.WorkflowID == mapping.WorkflowID {
+		opts.PreserveWorkflowStepID = replies.StepID
 	}
 
 	return p.syncSvc.PollInbound(ctx, workspaceID, issuesSvc, mapping, projectIDs, opts)
@@ -271,7 +282,7 @@ func applyWatchPriorityMapping(w watch.Watch, mapping fieldmapping.Mapping) watc
 // OnEvent handles task.moved for near-real-time outbound write-back (see
 // manifest.yaml's capabilities.events doc comment for why this plugin
 // declares an events capability at all). Every other event type is ignored.
-// Polling is inbound only: a missed task.moved is not reconstructed by a
+// Status polling is inbound only: a missed task.moved is not reconstructed by a
 // later poll and can instead be corrected with another move or the manual
 // "Set Redmine status" action.
 func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
@@ -319,6 +330,10 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 		return nil
 	}
 
+	if err := p.autoDraftReply(ctx, e, link.WorkspaceID, taskID, toStepID); err != nil {
+		return fmt.Errorf("redmine: preparing reply draft: %w", err)
+	}
+
 	mapping, found, err := p.fieldmappingSvc.Get(ctx, link.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("redmine: OnEvent task.moved: reading field mapping for workspace %s: %w", link.WorkspaceID, err)
@@ -364,6 +379,9 @@ func (p *redminePlugin) clearWorkspace(ctx context.Context, workspaceID string, 
 		return err
 	}
 	if err := p.syncSvc.Clear(ctx, workspaceID); err != nil {
+		return err
+	}
+	if err := p.Host().DeleteState(ctx, "workspace", workspaceID, replySettingsKey); err != nil {
 		return err
 	}
 	if err := p.connectionSvc.Disconnect(ctx, workspaceID); err != nil {

@@ -6,7 +6,7 @@ const bundle = await readFile(new URL("./bundle.js", import.meta.url), "utf8");
 
 async function loadBundleTestHooks() {
   globalThis.window = { registerKandevPlugin() {} };
-  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke };`;
+  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke, makeRedmineCommentAction, makeSettingsComponent };`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   return globalThis.__redmineBundleTestHooks;
 }
@@ -23,6 +23,209 @@ test("mapping selects use host controls and explicitly added live statuses", () 
   assert.match(bundle, /redmine-priority-map-" \+ priority\.id/);
   assert.match(bundle, /SelectTrigger, \{ "data-testid": "redmine-priority-map-" \+ priority\.id \}/);
   assert.doesNotMatch(bundle, /trackerLabels|task_label|redmine-tracker-label/);
+});
+
+async function commentDialog(invoke) {
+  const { makeRedmineCommentAction } = await loadBundleTestHooks();
+  let component;
+  let cursor = 0;
+  const hooks = [];
+  const host = {
+    jsx: (type, props, ...children) => ({ type, props: props || {}, children }),
+    React: {
+      useState(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = initial; return [hooks[index], value => { hooks[index] = value; }]; },
+      useRef(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = { current: initial }; return hooks[index]; },
+    },
+    ui: { Button: "Button", Textarea: "Textarea", Label: "Label", Badge: "Badge" },
+    api: { invokeAction: invoke },
+    toast: { error(message) { throw new Error(message); } },
+    openModal({ content }) { component = content; return { close() {} }; },
+  };
+  await makeRedmineCommentAction(host).run({ workspaceId: "workspace-1", taskId: "task-1" });
+  const render = () => { cursor = 0; return component(); };
+  const all = (node) => !node || typeof node !== "object" ? [] : [node, ...node.children.flat(Infinity).flatMap(all)];
+  return { render, find: id => all(render()).find(node => node.props["data-testid"] === id), select: () => all(render()).find(node => node.type === "select") };
+}
+
+test("comment preview never publishes and approval uses the immutable draft id", async () => {
+  const calls = [];
+  let finish;
+  const draft = { id: "draft-id", state: "prepared", notes: "Reviewed text", private_notes: false };
+  const dialog = await commentDialog(async (key, context) => {
+    calls.push({ key, context });
+    if (key === "comments.get") return { issue: { id: 42, url: "https://redmine.example/issues/42", subject: "Example" }, current_id: "", context_hash: "context-hash" };
+    if (key === "comments.prepare") return draft;
+    if (key === "comments.approve") return new Promise(resolve => { finish = () => resolve({ ...draft, state: "published", journal_id: 123 }); });
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-preview").props.disabled, true);
+  dialog.find("redmine-comment-notes").props.onChange({ target: { value: "Reviewed text" } });
+  dialog.select().props.onChange({ target: { value: "public" } });
+  await dialog.find("redmine-comment-preview").props.onClick();
+  assert.equal(calls.some(call => call.key === "comments.approve"), false);
+  assert.equal(dialog.find("redmine-comment-preview-text").children[0], "Reviewed text");
+  const approve = dialog.find("redmine-comment-approve").props.onClick;
+  const pending = approve();
+  await approve();
+  assert.equal(calls.filter(call => call.key === "comments.approve").length, 1);
+  assert.deepEqual(calls.at(-1).context, { workspaceId: "workspace-1", taskId: "task-1", body: { draft_id: "draft-id" } });
+  finish(); await pending;
+  assert.ok(dialog.find("redmine-comment-published"));
+});
+
+test("lost comment approval acknowledgement offers read-only reconciliation", async () => {
+  const calls = [];
+  const draft = { id: "draft-id", state: "prepared", notes: "Exact proposed text", private_notes: true };
+  const dialog = await commentDialog(async (key) => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: "draft-id", can_approve: true };
+    if (key === "comments.approve") throw new Error("Connection lost");
+    if (key === "comments.reconcile") return { ...draft, state: "published", journal_id: 123 };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-approve").props.onClick();
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  assert.ok(dialog.find("redmine-comment-reconcile"));
+  await dialog.find("redmine-comment-reconcile").props.onClick();
+  assert.ok(dialog.find("redmine-comment-published"));
+  assert.deepEqual(calls, ["comments.get", "comments.approve", "comments.reconcile"]);
+});
+
+test("editing a prepared comment invalidates its approval before accepting edits", async () => {
+  const calls = [];
+  const draft = { id: "draft-id", state: "prepared", notes: "Original text", private_notes: false };
+  const dialog = await commentDialog(async (key) => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: "draft-id", can_approve: true };
+    if (key === "comments.discard") return { ...draft, state: "cancelled" };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.ok(dialog.find("redmine-comment-notes"));
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  assert.deepEqual(calls, ["comments.get", "comments.get", "comments.discard"]);
+});
+
+test("a completed reply without a proposal can request a fresh draft", async () => {
+  const calls = [];
+  const dialog = await commentDialog(async key => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft_request: { state: "sent" }, can_request_draft: true };
+    if (key === "replies.request") return { state: "sent" };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-reply-request").props.disabled, false);
+  await dialog.find("redmine-reply-request").props.onClick();
+  assert.deepEqual(calls, ["comments.get", "replies.request"]);
+});
+
+test("a fresh proposal opens in the editor while retaining the previous publication", async () => {
+  const calls = [];
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const proposal = { issue_id: 42, notes: "New verified reply", private_notes: true };
+  const dialog = await commentDialog(async (key, context) => {
+    calls.push({ key, context });
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, proposal, current_id: receipt.id, context_hash: "fresh-context", can_request_draft: true };
+    if (key === "comments.prepare") return { id: "new-preview", state: "prepared", notes: proposal.notes, private_notes: true };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-notes")?.props.value, proposal.notes);
+  assert.equal(dialog.select().props.value, "private");
+  assert.equal(dialog.find("redmine-comment-previous-text").children[0], receipt.notes);
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  await dialog.find("redmine-comment-preview").props.onClick();
+  assert.deepEqual(calls.at(-1).context.body, { issue_id: 42, notes: proposal.notes, private_notes: true, expected_id: receipt.id, expected_context_hash: "fresh-context" });
+  assert.equal(calls.some(call => call.key === "comments.approve"), false);
+});
+
+test("New comment loads a proposal that arrived while the old receipt was open", async () => {
+  let reads = 0;
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, current_id: receipt.id, proposal: ++reads > 1 ? { notes: "New reply after refresh", private_notes: true } : null };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.equal(dialog.find("redmine-comment-notes").props.value, "New reply after refresh");
+  assert.equal(dialog.select().props.value, "private");
+  assert.equal(dialog.find("redmine-comment-previous-text").children[0], receipt.notes);
+});
+
+test("New comment does not prefill the already published proposal again", async () => {
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, current_id: receipt.id, proposal: { notes: receipt.notes, private_notes: false } };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.equal(dialog.find("redmine-comment-notes").props.value, "");
+  assert.equal(dialog.select().props.value, "");
+});
+
+test("new proposals never replace an operator's prepared preview implicitly", async () => {
+  const draft = { id: "human-preview", state: "prepared", notes: "Operator's reviewed text", private_notes: false };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: draft.id, can_approve: true, proposal: { notes: "A newer generated reply", private_notes: true } };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-preview-text").children[0], draft.notes);
+  assert.equal(dialog.find("redmine-comment-notes"), undefined);
+  assert.ok(dialog.find("redmine-comment-approve"));
+});
+
+async function replySettingsForm(autoPublish) {
+  const { makeSettingsComponent } = await loadBundleTestHooks();
+  const calls = [];
+  let cursor = 0;
+  let section = false;
+  let hooks = [{ state: "connected" }, false];
+  const effects = [];
+  const host = {
+    jsx: (type, props, ...children) => ({ type, props: props || {}, children }),
+    ui: new Proxy({}, { get: (_, key) => key }),
+    React: {
+      useState(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = initial; return [hooks[index], value => { hooks[index] = value; }]; },
+      useRef(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = { current: initial }; return hooks[index]; },
+      useCallback(fn) { return fn; },
+      useEffect(fn) { if (!section) return; const index = cursor++; if (!(index in hooks)) { hooks[index] = true; effects.push(fn); } },
+    },
+    toast: { success() {}, error(message) { throw new Error(message); } },
+    api: { async invokeAction(key, context) {
+      calls.push({ key, context });
+      if (key === "replies.settings.get") return { workflow_id: "workflow-1", step_id: "reply-step", prompt_name: "client-reply", ...(autoPublish === undefined ? {} : { auto_publish: autoPublish }) };
+      if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }] };
+      if (key === "replies.settings.save") return context.body;
+      throw new Error(`unexpected action ${key}`);
+    } },
+  };
+  const all = node => !node || typeof node !== "object" ? [] : [node, ...node.children.flat(Infinity).flatMap(all)];
+  const page = makeSettingsComponent(host)({ workspaceId: "workspace-1" });
+  const component = all(page).find(node => node.type?.name === "ReplyDraftingSection");
+  assert.ok(component);
+  section = true; hooks = [];
+  const render = () => { cursor = 0; return component.type(component.props); };
+  render(); effects.forEach(effect => effect());
+  await new Promise(resolve => setImmediate(resolve));
+  return { calls, find: id => all(render()).find(node => node.props["data-testid"] === id) };
+}
+
+test("reply publication defaults to human approval and saves either mode explicitly", async () => {
+  const form = await replySettingsForm(undefined);
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, false);
+  form.find("redmine-reply-auto-publish").props.onCheckedChange(true);
+  assert.equal(form.calls.some(call => call.key === "replies.settings.save"), false);
+  await form.find("redmine-reply-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.auto_publish, true);
+  assert.equal(form.calls.at(-1).context.workspaceId, "workspace-1");
+  assert.equal("taskId" in form.calls.at(-1).context, false);
+  form.find("redmine-reply-auto-publish").props.onCheckedChange(false);
+  await form.find("redmine-reply-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.auto_publish, false);
+});
+
+test("reply publication loads the saved automatic mode without silently resetting it", async () => {
+  const form = await replySettingsForm(true);
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, true);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

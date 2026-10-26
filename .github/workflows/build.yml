@@ -3,6 +3,9 @@ name: Build
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,4 +51,19 @@ jobs:
 
       - name: Package and validate all supported platforms
         working-directory: plugin
-        run: make verify-package
+        run: |
+          base_version="$(sed -n 's/^version: "\([0-9.]*\)"$/\1/p' manifest.yaml)"
+          test -n "$base_version"
+          package_version="${base_version}+ci.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          sed -i "s/^version: .*/version: \"${package_version}\"/" manifest.yaml
+          make verify-package VERSION="$package_version"
+          sha256sum kandev-plugin-redmine-*.tar.gz > SHA256SUMS
+
+      - name: Upload installable plugin
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: kandev-plugin-redmine
+          if-no-files-found: error
+          path: |
+            plugin/kandev-plugin-redmine-*.tar.gz
+            plugin/SHA256SUMS

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0] - Unreleased
+
+- Add configurable workflow-driven reply drafts with live public issue context.
+- Add immutable operator previews and explicit public/private comment approval.
+- Verify journal readback and retain uncertain attempts without repeating PUT.
+- Hold the communication step against inbound status-sync moves until a human moves it.
+- Keep reply generation disabled by default, credentials server-side, and human approval as the default publication mode.
+- Add an explicit workspace switch for automatic publication of new verified drafts, with policy receipts, session/interaction checks and no backlog draining.
+- Allow an explicit new draft after a completed refusal or malformed response, while active/uncertain work remains blocked.
+- Load subsequent proposals without hiding them behind earlier publication receipts or resending the old text.
+- Upload versioned installable CI packages for pull requests and main.
+
 ## [0.3.2] - 2026-09-14
 
 ### Changed
