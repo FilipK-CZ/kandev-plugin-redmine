@@ -50,7 +50,13 @@ automatic publication of new, verified draft responses.
   Bitbucket use.
 - **Bidirectional sync** — cursor-based polling with opt-in outbound
   write-back (`autoStatusWriteback`, `syncTitleDescription`) and echo
-  suppression so a write-back round trip never bounces the task.
+  suppression so a write-back round trip never bounces the task. Each tracker
+  route can have its own status map, independent of the default workflow.
+- **Automatic diagnosis** — an opt-in tracker rule imports source-status issues
+  assigned to the token's actual user, starts the configured entry agent and
+  claims only the working status after launch is verified. Global status
+  write-back and automatic customer replies can remain off. Configure a
+  read-only native profile; the plugin preserves its existing permissions.
 - **Composer `#` mentions** — resolves Redmine issues through
   `reference_sources` with submit-time reauthorization.
 - **Issue watchers** — one kandev task per newly matching issue, deduplicated

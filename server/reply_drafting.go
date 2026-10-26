@@ -15,6 +15,7 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 )
 
@@ -166,9 +167,17 @@ func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID strin
 	if err != nil {
 		return "", err
 	}
-	if found && mapping.WorkflowID == settings.WorkflowID {
-		if _, mapped := mapping.StatusForWorkflowStep(settings.StepID); mapped {
-			return "", fmt.Errorf("redmine: do not map the communication step to an automatic Redmine status")
+	if found {
+		maps := []fieldmapping.Mapping{mapping}
+		for _, route := range mapping.TrackerRoutes {
+			maps = append(maps, fieldmapping.Mapping{WorkflowID: route.WorkflowID, Statuses: route.Statuses})
+		}
+		for _, item := range maps {
+			if item.WorkflowID == settings.WorkflowID {
+				if _, mapped := item.StatusForWorkflowStep(settings.StepID); mapped {
+					return "", fmt.Errorf("redmine: do not map the communication step to an automatic Redmine status")
+				}
+			}
 		}
 	}
 	workflows, err := listWorkspaceWorkflows(ctx, p.Host().Workflows(), workspaceID)

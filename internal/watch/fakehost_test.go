@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"kandev-plugin-redmine/internal/tasklink"
@@ -30,6 +31,8 @@ type fakeHost struct {
 	setStateCalls  int
 	failSetStateAt int
 	getTaskErr     error
+	createErr      error
+	sessions       []pluginsdk.Session
 }
 
 func newFakeHost() *fakeHost {
@@ -87,8 +90,16 @@ func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, k string) erro
 	return nil
 }
 
-func (h *fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
-	return nil, nil
+func (h *fakeHost) ListState(_ context.Context, scope, scopeID string) ([]pluginsdk.StateEntry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var entries []pluginsdk.StateEntry
+	for k, value := range h.state {
+		if tail, found := strings.CutPrefix(k, key(scope, scopeID, "")); found {
+			entries = append(entries, pluginsdk.StateEntry{Key: tail, Value: value})
+		}
+	}
+	return entries, nil
 }
 func (h *fakeHost) GetConfig(context.Context) (map[string]any, error) { return map[string]any{}, nil }
 func (h *fakeHost) RevealSecret(context.Context, string) (string, error) {
@@ -133,13 +144,41 @@ func (r fakeTaskReader) Create(_ context.Context, in pluginsdk.CreateTaskInput) 
 	defer r.host.mu.Unlock()
 	r.host.nextID++
 	r.host.creates = append(r.host.creates, in)
+	if r.host.createErr != nil {
+		return nil, r.host.createErr
+	}
 	task := &pluginsdk.Task{
 		ID: fmt.Sprintf("task-%d", r.host.nextID), WorkspaceID: in.WorkspaceID,
-		Title: in.Title, Description: in.Description, State: "RUNNING",
+		WorkflowID: in.WorkflowID,
+		Title:      in.Title, Description: in.Description, State: "RUNNING",
 		Metadata: map[string]any{pluginMetadataKey: in.Metadata, "source": pluginMetadataKey},
+	}
+	if in.WorkflowStepID != nil {
+		task.WorkflowStepID = *in.WorkflowStepID
 	}
 	r.host.tasks[task.ID] = task
 	return task, nil
+}
+
+func (h *fakeHost) Sessions() pluginsdk.SessionReader {
+	return fakeSessionReader{SessionReader: pluginsdk.UnimplementedHostData{}.Sessions(), host: h}
+}
+
+type fakeSessionReader struct {
+	pluginsdk.SessionReader
+	host *fakeHost
+}
+
+func (r fakeSessionReader) List(_ context.Context, filter pluginsdk.SessionFilter, _ pluginsdk.Page) ([]pluginsdk.Session, *pluginsdk.PageInfo, error) {
+	var result []pluginsdk.Session
+	for _, session := range r.host.sessions {
+		for _, id := range filter.TaskIDs {
+			if session.TaskID == id {
+				result = append(result, session)
+			}
+		}
+	}
+	return result, nil, nil
 }
 
 func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {

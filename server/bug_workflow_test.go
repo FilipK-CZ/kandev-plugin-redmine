@@ -126,7 +126,7 @@ func TestAdditionalStageCanPublishOnlyWhenItsOwnModeIsEnabled(t *testing.T) {
 	require.Equal(t, 1, puts)
 }
 
-func TestTrackerRouteValidationUsesLiveTrackerAndScopedManualEntry(t *testing.T) {
+func TestTrackerRouteValidationUsesLiveTrackerAndConfiguredEntry(t *testing.T) {
 	p, h := newTestPlugin(t)
 	h.workflowReader = multiReplyWorkflows{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +146,32 @@ func TestTrackerRouteValidationUsesLiveTrackerAndScopedManualEntry(t *testing.T)
 	}
 	require.Error(t, p.validateTrackerRoutes(context.Background(), "ws-1", client, []fieldmapping.TrackerRoute{valid, valid}))
 	h.workflowReader = multiReplyWorkflows{autoStartEntry: true}
-	require.ErrorContains(t, p.validateTrackerRoutes(context.Background(), "ws-1", client, []fieldmapping.TrackerRoute{valid}), "must not auto-start")
+	require.NoError(t, p.validateTrackerRoutes(context.Background(), "ws-1", client, []fieldmapping.TrackerRoute{valid}))
+	valid.Statuses = []fieldmapping.StatusMapping{{RedmineStatusID: 2, WorkflowStepID: "step-done"}}
+	require.ErrorContains(t, p.validateTrackerRoutes(context.Background(), "ws-1", client, []fieldmapping.TrackerRoute{valid}), "selected workflow")
+}
+
+func TestDiagnosticPolicyUsesLiveOpenStatusesAndMapsRemainTrackerScoped(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/issue_statuses.json":
+			out.Write([]byte(`{"issue_statuses":[{"id":1,"name":"New"},{"id":3,"name":"Working"},{"id":5,"name":"Closed","is_closed":true}]}`))
+		case "/enumerations/issue_priorities.json":
+			out.Write([]byte(`{"issue_priorities":[]}`))
+		default:
+			out.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	client := redmineclient.New(srv.URL, "key", srv.Client())
+	mapping := fieldmapping.Mapping{Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "backlog"}}, TrackerRoutes: []fieldmapping.TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis", Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 1, WorkflowStepID: "diagnosis"}}, Diagnosis: &fieldmapping.DiagnosticPolicy{FromStatusID: 1, WorkingStatusID: 3}}}}
+	require.NoError(t, p.normalizeAndValidateMapping(context.Background(), client, &mapping))
+	require.Equal(t, "New", mapping.TrackerRoutes[0].Statuses[0].RedmineName)
+	for _, invalid := range []int{0, 5, 999} {
+		mapping.TrackerRoutes[0].Diagnosis.WorkingStatusID = invalid
+		require.ErrorContains(t, p.normalizeAndValidateMapping(context.Background(), client, &mapping), "live open statuses")
+	}
 }
 
 func TestExistingWatchUsesCurrentTrackerRoutingOnEachPoll(t *testing.T) {

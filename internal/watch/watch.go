@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"kandev-plugin-redmine/internal/fieldmapping"
@@ -64,6 +65,7 @@ type Watch struct {
 	PriorityMappings map[int]string
 	// Resolved from current workspace settings on every poll, not watch state.
 	TrackerRoutes    []fieldmapping.TrackerRoute
+	EntrySteps       map[string][]pluginsdk.WorkflowStep
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
 }
@@ -221,6 +223,15 @@ func (s *Service) deleteWatchLocked(ctx context.Context, workspaceID, watchID st
 	if !found {
 		return fmt.Errorf("watch: %s does not belong to workspace %s", watchID, workspaceID)
 	}
+	entries, err := s.host.ListState(ctx, workspaceScope, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Key, "autostart_issue.") && entry.Value["watch_id"] == watchID {
+			return fmt.Errorf("watch: an unconfirmed auto-start import requires native inspection before removing this watch")
+		}
+	}
 	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return err
@@ -269,6 +280,39 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 		return nil
 	}
 
+	var failures []error
+	tokenUserID := 0
+	var tokenUserErr error
+	for _, route := range w.TrackerRoutes {
+		if route.Diagnosis != nil {
+			tokenUserID, tokenUserErr = issuesSvc.TokenUserID(ctx)
+			if tokenUserErr != nil {
+				failures = append(failures, tokenUserErr)
+			}
+			break
+		}
+	}
+	owned, err := s.watchTasks(ctx, w.WorkspaceID, w.ID)
+	if err != nil {
+		return err
+	}
+	entries, err := s.host.ListState(ctx, workspaceScope, w.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Key, "autostart_issue.") && entry.Value["watch_id"] == w.ID {
+			failures = append(failures, fmt.Errorf("watch: %s has an unconfirmed earlier attempt (task %v); inspect it before retrying", entry.Key, entry.Value["task_id"]))
+		}
+	}
+	for _, taskID := range owned {
+		if tokenUserErr != nil {
+			continue
+		}
+		if err := s.claimDiagnosis(ctx, w, taskID, tokenUserID, issuesSvc); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	for offset := 0; ; {
 		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), NativeFilters: w.nativeFilters(), Offset: offset, Limit: 100})
 		if err != nil {
@@ -294,13 +338,13 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 					continue // leave unseen: retry once a slot frees up
 				}
 			}
-			if err := s.createTask(ctx, w, issue); err != nil {
-				return err
+			if err := s.createTask(ctx, w, issue, tokenUserID, issuesSvc); err != nil {
+				failures = append(failures, err)
 			}
 		}
 		offset += len(result.Issues)
 		if len(result.Issues) == 0 || offset >= result.TotalCount {
-			return nil
+			return errors.Join(failures...)
 		}
 	}
 }
@@ -318,16 +362,73 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 	return false, nil
 }
 
-func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
+func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, tokenUserID int, issuesSvc *issues.Service) error {
+	if _, found, err := s.host.GetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID)); err != nil {
+		return err
+	} else if found {
+		return fmt.Errorf("watch: auto-start import of issue %d has an unconfirmed earlier attempt; inspect the native task before retrying", issue.ID)
+	}
+	if _, linked, err := s.tasklinks.TaskIDForIssue(ctx, w.WorkspaceID, issue.ID); err != nil || linked {
+		return err
+	}
+	var statuses []fieldmapping.StatusMapping
+	var diagnosis *diagnosticClaim
+	routed := false
 	for _, route := range w.TrackerRoutes {
 		if route.RedmineTrackerID == issue.TrackerID {
 			w.WorkflowID, w.WorkflowStepID = route.WorkflowID, route.WorkflowStepID
+			statuses = route.Statuses
+			routed = true
+			if route.Diagnosis != nil {
+				entry, err := route.DiagnosticEntry(w.EntrySteps[route.WorkflowID])
+				if err != nil {
+					return err
+				}
+				if tokenUserID <= 0 || issue.StatusID != route.Diagnosis.FromStatusID || issue.AssigneeID != tokenUserID {
+					return nil
+				}
+				current, err := issuesSvc.GetIssue(ctx, issue.ID)
+				if err != nil {
+					return err
+				}
+				if current.ProjectID != w.ProjectID || current.TrackerID != route.RedmineTrackerID || current.StatusID != route.Diagnosis.FromStatusID || current.AssigneeID != tokenUserID || !w.matches(*current) {
+					return nil
+				}
+				issue = *current
+				diagnosis = &diagnosticClaim{State: "pending", IssueID: issue.ID, ProjectID: issue.ProjectID, TrackerID: issue.TrackerID, TokenUserID: tokenUserID, WorkflowID: route.WorkflowID, StepID: route.WorkflowStepID, ProfileID: entry.AgentProfileID, FromStatusID: route.Diagnosis.FromStatusID, WorkingStatusID: route.Diagnosis.WorkingStatusID}
+			}
 			break
 		}
+	}
+	if step, mapped := (fieldmapping.Mapping{Statuses: statuses}).WorkflowStepForStatus(issue.StatusID); mapped {
+		w.WorkflowStepID = step
+	}
+	startAgent := false
+	for _, step := range w.EntrySteps[w.WorkflowID] {
+		if step.ID != w.WorkflowStepID && !(w.WorkflowStepID == "" && step.IsStartStep) {
+			continue
+		}
+		if !routed && !step.IsStartStep {
+			continue
+		}
+		for _, action := range step.OnEnterActionTypes {
+			startAgent = startAgent || action == "auto_start_agent"
+		}
+	}
+	if startAgent {
+		if err := s.host.SetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID), map[string]any{"state": "creating", "issue_id": issue.ID, "watch_id": w.ID}); err != nil {
+			return err
+		}
+	}
+	var launch *pluginsdk.PluginTaskLaunchOptions
+	if diagnosis != nil {
+		launch = &pluginsdk.PluginTaskLaunchOptions{AgentProfileID: &diagnosis.ProfileID}
 	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
 		WorkflowID:  w.WorkflowID,
+		StartAgent:  startAgent,
+		Launch:      launch,
 		WorkflowStepID: func() *string {
 			if w.WorkflowStepID == "" {
 				return nil
@@ -344,16 +445,45 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		},
 	})
 	if err != nil {
+		if startAgent && (status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.Unimplemented) {
+			err = errors.Join(err, s.host.DeleteState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID)))
+		}
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
+	retain := func(cause error) error {
+		if startAgent {
+			return fmt.Errorf("watch: auto-start task %s retained for native inspection: %w", task.ID, cause)
+		}
+		return s.compensateCreatedTask(ctx, task.ID, cause)
+	}
+	if startAgent {
+		if err := s.host.SetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID), map[string]any{"state": "created", "issue_id": issue.ID, "task_id": task.ID, "watch_id": w.ID}); err != nil {
+			return retain(err)
+		}
+	}
 	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
-		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+		return retain(fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+	}
+	if routed {
+		if err := s.tasklinks.ObserveStatus(ctx, task.ID, issue.StatusID, issue.TrackerID, false); err != nil {
+			return retain(err)
+		}
+	}
+	if diagnosis != nil {
+		if err := s.saveDiagnosticClaim(ctx, task.ID, *diagnosis); err != nil {
+			return retain(err)
+		}
 	}
 	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
-		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+		return retain(fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+	}
+	if startAgent {
+		return s.host.DeleteState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID))
 	}
 	return nil
 }
+
+func autoStartKey(issueID int) string { return "autostart_issue." + strconv.Itoa(issueID) }
 
 func (w Watch) redmineFilters() map[string]string {
 	filters := make(map[string]string)
@@ -456,6 +586,24 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 		return 0, err
 	}
 	count := 0
+	entries, err := s.host.ListState(ctx, workspaceScope, w.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Key, "autostart_issue.") || entry.Value["watch_id"] != w.ID {
+			continue
+		}
+		indexed := false
+		for _, taskID := range tasks {
+			if taskID == entry.Value["task_id"] {
+				indexed = true
+			}
+		}
+		if !indexed {
+			count++
+		} // An unknown launch still occupies a slot.
+	}
 	for _, taskID := range tasks {
 		task, err := s.host.Tasks().Get(ctx, taskID)
 		if err != nil {

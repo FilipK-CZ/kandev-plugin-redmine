@@ -195,7 +195,7 @@ async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSectio
       if (key === "replies.settings.get") return { workflow_id: "workflow-1", step_id: "reply-step", prompt_name: "client-reply", ...(autoPublish === undefined ? {} : { auto_publish: autoPublish }) };
       if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }, { id: "workflow-bug", name: "Bugs", steps: [{ id: "diagnosis", name: "Diagnosis" }] }] };
       if (key === "replies.settings.save") return context.body;
-      if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], live_statuses: [], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
+      if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], live_statuses: [{ id: 1, name: "New" }, { id: 3, name: "Working" }], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
       if (key === "fieldmapping.save") return { saved: true };
       throw new Error(`unexpected action ${key}`);
     } },
@@ -268,10 +268,52 @@ test("tracker routing saves explicit tracker and entry without replacing default
   await form.find("redmine-fieldmapping-save").props.onClick();
   assert.equal(form.calls.at(-1).key, "fieldmapping.save");
   assert.equal(form.calls.at(-1).context.body.workflow_id, "workflow-1");
-  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes, [{ redmine_tracker_id: 8, workflow_id: "workflow-bug", workflow_step_id: "diagnosis" }]);
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes, [{ redmine_tracker_id: 8, workflow_id: "workflow-bug", workflow_step_id: "diagnosis", statuses: [] }]);
   form.select("redmine-route-workflow-0", "workflow-1");
   await form.find("redmine-fieldmapping-save").props.onClick();
   assert.equal(form.calls.at(-1).context.body.tracker_routes[0].workflow_step_id, "", "changing workflow must not retain a foreign step");
+});
+
+test("tracker status maps remain independent and clear foreign steps on workflow change", async () => {
+  const form = await replySettingsForm(undefined, "FieldMappingSection");
+  for (let i = 0; i < 2; i++) {
+    form.find("redmine-route-add").props.onClick();
+    form.select(`redmine-route-tracker-${i}`, String(8 + i));
+    form.select(`redmine-route-workflow-${i}`, i ? "workflow-1" : "workflow-bug");
+    form.select(`redmine-route-step-${i}`, i ? "reply-step" : "diagnosis");
+    form.find(`redmine-route-status-add-${i}`).props.onClick();
+    form.select(`redmine-route-status-${i}-0`, "1");
+    form.select(`redmine-route-status-step-${i}-0`, i ? "reply-step" : "diagnosis");
+  }
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  const saved = form.calls.at(-1).context.body;
+  assert.deepEqual(saved.statuses, []);
+  assert.deepEqual(saved.tracker_routes.map(route => route.statuses[0]), [
+    { redmine_status_id: 1, workflow_step_id: "diagnosis" },
+    { redmine_status_id: 1, workflow_step_id: "reply-step" },
+  ]);
+  form.select("redmine-route-workflow-0", "workflow-1");
+  await assert.rejects(form.find("redmine-fieldmapping-save").props.onClick(), /Choose a Redmine status and workflow step/);
+  assert.equal(form.find("redmine-route-status-step-0-0").children[0].props.placeholder, "Choose workflow step");
+});
+
+test("selective diagnostic claim requires explicit open statuses and can be disabled independently", async () => {
+  const form = await replySettingsForm(undefined, "FieldMappingSection");
+  form.find("redmine-route-add").props.onClick();
+  form.select("redmine-route-tracker-0", "8");
+  form.select("redmine-route-workflow-0", "workflow-bug");
+  form.select("redmine-route-step-0", "diagnosis");
+  assert.equal(form.find("redmine-route-diagnosis-0").props.checked, false);
+  form.find("redmine-route-diagnosis-0").props.onCheckedChange(true);
+  await assert.rejects(form.find("redmine-fieldmapping-save").props.onClick(), /distinct source and working statuses/);
+  form.select("redmine-route-diagnosis-from-0", "1");
+  form.select("redmine-route-diagnosis-working-0", "3");
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes[0].diagnosis, { from_status_id: 1, working_status_id: 3 });
+  assert.equal(form.calls.some(call => call.key === "syncoptions.save" || call.key === "replies.settings.save"), false);
+  form.find("redmine-route-diagnosis-0").props.onCheckedChange(false);
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.tracker_routes[0].diagnosis, undefined);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

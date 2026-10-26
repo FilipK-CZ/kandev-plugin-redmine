@@ -4,13 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
 )
 
 func TestService_SaveAndGet_RoundTrips(t *testing.T) {
 	svc := New(newFakeHost())
 	mapping := Mapping{
-		TrackerRoutes: []TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis"}},
+		TrackerRoutes: []TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "diagnosis", Statuses: []StatusMapping{{RedmineStatusID: 1, RedmineName: "New", WorkflowStepID: "diagnosis"}}, Diagnosis: &DiagnosticPolicy{FromStatusID: 1, WorkingStatusID: 3}}},
 		Statuses: []StatusMapping{
 			{RedmineStatusID: 2, RedmineName: "Shipped", IsClosed: true, WorkflowStepID: "step-done"},
 		},
@@ -25,6 +26,26 @@ func TestService_SaveAndGet_RoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, mapping, got)
+}
+
+func TestDiagnosticEntryCannotSkipDiagnosisOrUseAnUnconfiguredLaunch(t *testing.T) {
+	route := TrackerRoute{WorkflowID: "bugs", WorkflowStepID: "diagnosis", Diagnosis: &DiagnosticPolicy{FromStatusID: 1, WorkingStatusID: 3}}
+	entry := pluginsdk.WorkflowStep{ID: "diagnosis", AgentProfileID: "readonly", OnEnterActionTypes: []string{"auto_start_agent"}}
+	_, err := route.DiagnosticEntry([]pluginsdk.WorkflowStep{entry})
+	require.NoError(t, err)
+	route.Statuses = []StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "implementation"}}
+	_, err = route.DiagnosticEntry([]pluginsdk.WorkflowStep{entry})
+	require.ErrorContains(t, err, "diagnostic entry step")
+	route.Statuses[0].WorkflowStepID = "diagnosis"
+	entry.OnEnterActionTypes = nil
+	_, err = route.DiagnosticEntry([]pluginsdk.WorkflowStep{entry})
+	require.ErrorContains(t, err, "native auto-start")
+	entry.OnEnterActionTypes, entry.AgentProfileID = []string{"auto_start_agent"}, ""
+	_, err = route.DiagnosticEntry([]pluginsdk.WorkflowStep{entry})
+	require.Error(t, err)
+	route.Diagnosis.WorkingStatusID = 1
+	_, err = route.DiagnosticEntry([]pluginsdk.WorkflowStep{entry})
+	require.ErrorContains(t, err, "distinct")
 }
 
 func TestGet_NoneSaved_ReturnsNotFound(t *testing.T) {

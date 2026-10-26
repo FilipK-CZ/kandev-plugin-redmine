@@ -46,12 +46,21 @@ func (p *redminePlugin) validateTrackerRoutes(ctx context.Context, workspaceID s
 				if step.ID != route.WorkflowStepID {
 					continue
 				}
-				for _, action := range step.OnEnterActionTypes {
-					if action == "auto_start_agent" {
-						return fmt.Errorf("redmine: routed import entry steps must not auto-start an agent")
-					}
-				}
 				found = true
+			}
+			validSteps := map[string]bool{}
+			for _, step := range steps {
+				validSteps[step.ID] = true
+			}
+			for _, status := range route.Statuses {
+				if status.WorkflowStepID != "" && !validSteps[status.WorkflowStepID] {
+					return fmt.Errorf("redmine: tracker status mapping step does not belong to its selected workflow")
+				}
+			}
+			if route.Diagnosis != nil {
+				if _, err := route.DiagnosticEntry(steps); err != nil {
+					return err
+				}
 			}
 		}
 		if !found {

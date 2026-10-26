@@ -186,7 +186,7 @@ func (fakeWorkflowReader) List(context.Context, string, pluginsdk.Page) ([]plugi
 
 func (fakeWorkflowReader) ListSteps(context.Context, string) ([]pluginsdk.WorkflowStep, error) {
 	return []pluginsdk.WorkflowStep{
-		{ID: "step-backlog", Name: "Backlog"},
+		{ID: "step-backlog", Name: "Backlog", IsStartStep: true},
 		{ID: "step-done", Name: "Done"},
 	}, nil
 }

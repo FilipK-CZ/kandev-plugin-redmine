@@ -270,6 +270,7 @@ func TestPollInbound_NoProjectsSelected_IsNoOp(t *testing.T) {
 
 func TestPushWriteback_MappedStepChange_IssuesPUTAndRecordsEchoSuppression(t *testing.T) {
 	host := newFakeHost()
+	host.task.WorkflowStepID = "step-done"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -304,6 +305,7 @@ func TestPushWriteback_MappedStepChange_IssuesPUTAndRecordsEchoSuppression(t *te
 
 func TestPushWriteback_Disabled_IssuesNoPUT(t *testing.T) {
 	host := newFakeHost()
+	host.task.WorkflowStepID = "step-done"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -323,6 +325,7 @@ func TestPushWriteback_Disabled_IssuesNoPUT(t *testing.T) {
 
 func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 	host := newFakeHost()
+	host.task.WorkflowStepID = "step-done"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -348,6 +351,7 @@ func TestPushWriteback_AlreadyPushedSameStatus_IsIdempotent(t *testing.T) {
 
 func TestPushWriteback_StaleMarkerDoesNotSuppressRemoteDrift(t *testing.T) {
 	host := newFakeHost()
+	host.task.WorkflowStepID = "step-done"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))
@@ -394,6 +398,7 @@ func TestEchoSuppression_WriteBackThenInboundPoll_DoesNotBounceTask(t *testing.T
 
 func TestPushWriteback_DuplicateAfterEchoConsumptionReadsLiveStatusAndSkipsPUT(t *testing.T) {
 	host := newFakeHost()
+	host.task.WorkflowStepID = "step-done"
 	tl := tasklink.New(host)
 	svc := New(host, tl)
 	require.NoError(t, tl.Set(context.Background(), "task-1", "ws-1", 42, "url"))

@@ -656,6 +656,8 @@ function makeSettingsComponent(host) {
         toast.error("Choose a workflow step for every added Redmine status.");
         return;
       }
+      if (trackerRoutes.some(route => (route.statuses || []).some(status => !status.redmine_status_id || !status.workflow_step_id))) { toast.error("Choose a Redmine status and workflow step for every tracker status mapping."); return; }
+      if (trackerRoutes.some(route => route.diagnosis && (!route.diagnosis.from_status_id || !route.diagnosis.working_status_id || route.diagnosis.from_status_id === route.diagnosis.working_status_id))) { toast.error("Choose distinct source and working statuses for automatic diagnosis."); return; }
       const statuses = mappedStatuses.map((s) => ({
         redmine_status_id: s.id,
         redmine_name: s.name,
@@ -692,7 +694,7 @@ function makeSettingsComponent(host) {
         { className: "space-y-6" },
         h("div", { className: "space-y-3", "data-testid": "redmine-tracker-routes" },
           h("h4", { className: "text-sm font-medium" }, "Tracker → new task workflow"),
-          h("p", { className: "text-sm text-muted-foreground" }, "Overrides placement for new watcher imports only. Trackers without a route use the current default workflow below; remove a route to restore that default. Existing tasks stay in place. Routed workflows manage their own stages; default Redmine status mapping does not move them. Entry steps must not auto-start an agent."),
+          h("p", { className: "text-sm text-muted-foreground" }, "Trackers without a route use the default workflow and status map below. Each override has its own entry step and status map. New imports can auto-start when their selected step explicitly enables it. Existing tasks are not moved by changing a route."),
           trackerRoutes.map((route, index) => {
             const change = patch => setTrackerRoutes(trackerRoutes.map((item, i) => i === index ? { ...item, ...patch } : item));
             const steps = workflows.find(workflow => workflow.id === route.workflow_id)?.steps || [];
@@ -702,16 +704,43 @@ function makeSettingsComponent(host) {
                   h(SelectTrigger, { id: `redmine-route-tracker-${index}`, "data-testid": `redmine-route-tracker-${index}` }, h(SelectValue, { placeholder: "Choose tracker" })),
                   h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose tracker"), (live.live_trackers || []).map(tracker => h(SelectItem, { key: tracker.id, value: String(tracker.id) }, tracker.name))))),
               h("div", null, h(Label, { htmlFor: `redmine-route-workflow-${index}` }, "Workflow"),
-                h(Select, { value: route.workflow_id || "__none__", onValueChange: value => change({ workflow_id: value === "__none__" ? "" : value, workflow_step_id: "" }) },
+                h(Select, { value: route.workflow_id || "__none__", onValueChange: value => change({ workflow_id: value === "__none__" ? "" : value, workflow_step_id: "", statuses: (route.statuses || []).map(status => ({ ...status, workflow_step_id: "" })) }) },
                   h(SelectTrigger, { id: `redmine-route-workflow-${index}`, "data-testid": `redmine-route-workflow-${index}` }, h(SelectValue, { placeholder: "Choose workflow" })),
                   h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose workflow"), workflows.map(workflow => h(SelectItem, { key: workflow.id, value: workflow.id }, workflow.name))))),
               h("div", null, h(Label, { htmlFor: `redmine-route-step-${index}` }, "Entry step"),
                 h(Select, { value: route.workflow_step_id || "__none__", onValueChange: value => change({ workflow_step_id: value === "__none__" ? "" : value }) },
                   h(SelectTrigger, { id: `redmine-route-step-${index}`, "data-testid": `redmine-route-step-${index}` }, h(SelectValue, { placeholder: "Choose entry step" })),
                   h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose entry step"), steps.map(step => h(SelectItem, { key: step.id, value: step.id }, step.name))))),
-              h(Button, { type: "button", variant: "ghost", disabled: saving, "data-testid": `redmine-route-remove-${index}`, onClick: () => setTrackerRoutes(trackerRoutes.filter((_, i) => i !== index)) }, "Remove route"));
+              h(Button, { type: "button", variant: "ghost", disabled: saving, "data-testid": `redmine-route-remove-${index}`, onClick: () => setTrackerRoutes(trackerRoutes.filter((_, i) => i !== index)) }, "Remove route"),
+              h("div", { className: "space-y-2 sm:col-span-4" },
+                h("h5", { className: "text-sm font-medium" }, "Statuses → workflow step for this tracker"),
+                h("p", { className: "text-xs text-muted-foreground" }, "Unmapped statuses leave the workflow stage unchanged. Keep communication approval steps unmapped. The status map below belongs only to this tracker and workflow."),
+                (route.statuses || []).map((status, row) => {
+                  const update = patch => change({ statuses: route.statuses.map((item, r) => r === row ? { ...item, ...patch } : item) });
+                  return h("div", { key: row, className: "grid gap-2 sm:grid-cols-[1fr_1fr_auto]" },
+                    h(Select, { value: String(status.redmine_status_id || "__none__"), onValueChange: value => update({ redmine_status_id: value === "__none__" ? 0 : Number(value) }) },
+                      h(SelectTrigger, { "aria-label": "Redmine status for tracker", "data-testid": `redmine-route-status-${index}-${row}` }, h(SelectValue, { placeholder: "Choose Redmine status" })),
+                      h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose Redmine status"), (live.live_statuses || []).filter(item => item.id === status.redmine_status_id || !(route.statuses || []).some(other => other.redmine_status_id === item.id)).map(item => h(SelectItem, { key: item.id, value: String(item.id) }, item.name)))),
+                    h(Select, { value: status.workflow_step_id || "__none__", onValueChange: value => update({ workflow_step_id: value === "__none__" ? "" : value }) },
+                      h(SelectTrigger, { "aria-label": "Workflow step for tracker status", "data-testid": `redmine-route-status-step-${index}-${row}` }, h(SelectValue, { placeholder: "Choose workflow step" })),
+                      h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose workflow step"), steps.map(step => h(SelectItem, { key: step.id, value: step.id }, step.name)))),
+                    h(Button, { type: "button", variant: "ghost", disabled: saving, "data-testid": `redmine-route-status-remove-${index}-${row}`, onClick: () => change({ statuses: route.statuses.filter((_, r) => r !== row) }) }, "Remove status"));
+                }),
+                h(Button, { type: "button", variant: "outline", disabled: saving || !route.workflow_id, "data-testid": `redmine-route-status-add-${index}`, onClick: () => change({ statuses: [...(route.statuses || []), { redmine_status_id: 0, workflow_step_id: "" }] }) }, "Add tracker status")),
+              h("div", { className: "space-y-2 border-t pt-3 sm:col-span-4" },
+                h("div", { className: "flex items-center gap-2" },
+                  h(Switch, { id: `redmine-route-diagnosis-${index}`, "data-testid": `redmine-route-diagnosis-${index}`, checked: !!route.diagnosis, disabled: saving, onCheckedChange: checked => change({ diagnosis: checked ? { from_status_id: 0, working_status_id: 0 } : undefined }) }),
+                  h(Label, { htmlFor: `redmine-route-diagnosis-${index}` }, "Automatically diagnose issues assigned to the token user")),
+                h("p", { className: "text-xs text-muted-foreground" }, "Off by default. When enabled, this tracker imports only issues in the source status assigned to the API token's current user. Use a read-only entry profile with native auto-start. After launch is verified, the plugin sets only the working status, even with global write-back off. Replies still need their own approval."),
+                route.diagnosis ? h("div", { className: "grid gap-2 sm:grid-cols-2" },
+                  ...[["from_status_id", "Source status", "from"], ["working_status_id", "Working status after launch", "working"]].map(([field, label, testID]) =>
+                    h("div", { key: field },
+                      h(Label, { htmlFor: `redmine-route-diagnosis-${testID}-${index}` }, label),
+                      h(Select, { value: String(route.diagnosis[field] || "__none__"), onValueChange: value => change({ diagnosis: { ...route.diagnosis, [field]: value === "__none__" ? 0 : Number(value) } }) },
+                        h(SelectTrigger, { id: `redmine-route-diagnosis-${testID}-${index}`, "data-testid": `redmine-route-diagnosis-${testID}-${index}` }, h(SelectValue, { placeholder: "Choose open Redmine status" })),
+                        h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose status"), (live.live_statuses || []).filter(status => !status.is_closed).map(status => h(SelectItem, { key: status.id, value: String(status.id) }, status.name))))))) : null));
           }),
-          h(Button, { type: "button", variant: "outline", disabled: saving || trackerRoutes.length >= 20, "data-testid": "redmine-route-add", onClick: () => setTrackerRoutes([...trackerRoutes, { redmine_tracker_id: 0, workflow_id: "", workflow_step_id: "" }]) }, "Add tracker route")),
+          h(Button, { type: "button", variant: "outline", disabled: saving || trackerRoutes.length >= 20, "data-testid": "redmine-route-add", onClick: () => setTrackerRoutes([...trackerRoutes, { redmine_tracker_id: 0, workflow_id: "", workflow_step_id: "", statuses: [] }]) }, "Add tracker route")),
         h("div", { className: "space-y-2" },
           h(Label, { htmlFor: "redmine-mapping-workflow" }, "Default workflow"),
           h(Select, { value: workflowId, onValueChange: (nextWorkflowId) => {
@@ -727,7 +756,7 @@ function makeSettingsComponent(host) {
         h(
           "div",
           { className: "space-y-3" },
-          h("h4", { className: "mb-2 text-sm font-medium" }, "Statuses → workflow step"),
+          h("h4", { className: "mb-2 text-sm font-medium" }, "Statuses → default workflow step"),
           mappedStatuses.length ? h(
             Table,
             { id: "redmine-status-mapping-table" },
@@ -851,7 +880,7 @@ function makeSettingsComponent(host) {
     return h(
       Card,
       { id: "redmine-syncoptions-card" },
-      h(CardHeader, null, h(CardTitle, null, "Sync options"), h(CardDescription, null, "Both default off: manual write-back only.")),
+      h(CardHeader, null, h(CardTitle, null, "Sync options"), h(CardDescription, null, "Both default off. A tracker-specific diagnostic claim can be enabled separately in Field mapping.")),
       h(
         CardContent,
         { className: "space-y-4" },
@@ -861,7 +890,7 @@ function makeSettingsComponent(host) {
           h("div", null, h(Label, { htmlFor: "redmine-auto-writeback" }, "Automatic status write-back"), h(
             "p",
             { className: "text-muted-foreground text-xs" },
-            "Push a mapped status to Redmine when a linked task moves to that workflow step.",
+            "Push mapped statuses for all linked tasks. For diagnostic takeover only, leave this off and use the tracker rule in Field mapping.",
           )),
           h(Switch, {
             id: "redmine-auto-writeback",

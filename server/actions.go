@@ -443,17 +443,30 @@ func (p *redminePlugin) normalizeAndValidateMapping(ctx context.Context, client 
 	for _, value := range priorities {
 		priorityByID[value.ID] = value
 	}
-	seenStatuses, seenPriorities := map[int]bool{}, map[int]bool{}
-	for i := range mapping.Statuses {
-		item := &mapping.Statuses[i]
-		live, ok := statusByID[item.RedmineStatusID]
-		if item.RedmineStatusID <= 0 || !ok || seenStatuses[item.RedmineStatusID] {
-			return fmt.Errorf("redmine: status mapping id %d is invalid or duplicated", item.RedmineStatusID)
+	statusLists := [][]fieldmapping.StatusMapping{mapping.Statuses}
+	for _, route := range mapping.TrackerRoutes {
+		statusLists = append(statusLists, route.Statuses)
+		if route.Diagnosis != nil {
+			for _, id := range []int{route.Diagnosis.FromStatusID, route.Diagnosis.WorkingStatusID} {
+				if live, found := statusByID[id]; !found || id <= 0 || live.IsClosed {
+					return fmt.Errorf("redmine: choose live open statuses for automatic diagnosis")
+				}
+			}
 		}
-		seenStatuses[item.RedmineStatusID] = true
-		item.RedmineName = live.Name
-		item.IsClosed = live.IsClosed
 	}
+	for _, items := range statusLists {
+		seenStatuses := map[int]bool{}
+		for i := range items {
+			item := &items[i]
+			live, ok := statusByID[item.RedmineStatusID]
+			if item.RedmineStatusID <= 0 || !ok || seenStatuses[item.RedmineStatusID] {
+				return fmt.Errorf("redmine: status mapping id %d is invalid or duplicated", item.RedmineStatusID)
+			}
+			seenStatuses[item.RedmineStatusID] = true
+			item.RedmineName, item.IsClosed = live.Name, live.IsClosed
+		}
+	}
+	seenPriorities := map[int]bool{}
 	for i := range mapping.Priorities {
 		item := &mapping.Priorities[i]
 		live, ok := priorityByID[item.RedminePriorityID]
