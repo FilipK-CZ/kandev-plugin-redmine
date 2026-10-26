@@ -199,21 +199,27 @@ function makeSetRedmineStatusAction(host) {
 
 function makeRedmineCommentAction(host) {
   const h = host.jsx;
+  const differsFrom = (proposal, receipt) => proposal && (proposal.notes !== receipt?.notes || proposal.private_notes !== receipt?.private_notes);
   return {
     id: "redmine-comment", label: "Review Redmine reply", group: "primary", singleTaskOnly: true,
     async run(context) {
       try {
         const initial = await taskActionInvoke(host, "comments.get", context, {});
+        const previousPublication = initial.draft?.state === "published" ? initial.draft : null;
+        const freshProposal = previousPublication && differsFrom(initial.proposal, previousPublication);
+        const editorSource = freshProposal ? initial.proposal : initial.draft || initial.proposal;
         const closeRef = {};
         function CommentModal() {
           const React = host.React;
           const { Button, Textarea, Label, Badge } = host.ui;
-          const [review, setReview] = React.useState(initial.draft?.state === "prepared" && !initial.can_approve ? null : initial.draft);
+          const [view, setView] = React.useState(initial);
+          const [receipt, setReceipt] = React.useState(previousPublication);
+          const [review, setReview] = React.useState(freshProposal || (initial.draft?.state === "prepared" && !initial.can_approve) ? null : initial.draft);
           const [currentID, setCurrentID] = React.useState(initial.current_id || "");
           const [issue, setIssue] = React.useState(initial.issue);
           const [contextHash, setContextHash] = React.useState(initial.context_hash);
-          const [notes, setNotes] = React.useState(initial.draft?.notes || initial.proposal?.notes || "");
-          const [visibility, setVisibility] = React.useState(initial.draft ? (initial.draft.private_notes ? "private" : "public") : initial.proposal ? (initial.proposal.private_notes ? "private" : "public") : "");
+          const [notes, setNotes] = React.useState(editorSource?.notes || "");
+          const [visibility, setVisibility] = React.useState(editorSource ? (editorSource.private_notes ? "private" : "public") : "");
           const [error, setError] = React.useState(null);
           const [busy, setBusy] = React.useState(false);
           const [uncertain, setUncertain] = React.useState(false);
@@ -247,7 +253,12 @@ function makeRedmineCommentAction(host) {
           const edit = () => run(async () => {
             const latest = await taskActionInvoke(host, "comments.get", context, {});
             if (review?.state === "prepared") await taskActionInvoke(host, "comments.discard", context, { draft_id: review.id });
-            if (review?.state === "published") { setNotes(""); setVisibility(""); }
+            if (review?.state === "published") {
+              const published = latest.draft?.state === "published" ? latest.draft : review;
+              const proposal = differsFrom(latest.proposal, published) ? latest.proposal : null;
+              setReceipt(published); setNotes(proposal?.notes || ""); setVisibility(proposal ? (proposal.private_notes ? "private" : "public") : "");
+            }
+            setView(latest);
             setIssue(latest.issue); setContextHash(latest.context_hash); setCurrentID(latest.current_id || "");
             setReview(null); setUncertain(false);
           });
@@ -255,10 +266,14 @@ function makeRedmineCommentAction(host) {
           return h("div", { className: "space-y-4", "data-testid": "redmine-comment-modal" },
             h("a", { href: review?.issue_url || issue.url, target: "_blank", rel: "noopener noreferrer", className: "font-medium underline" }, `#${issue.id} · ${review?.subject || issue.subject}`),
             h("p", { className: "text-sm text-muted-foreground" }, "Review the exact text and visibility. Only approval below publishes it; status and other issue fields stay unchanged."),
-            initial.draft_warning ? h("p", { className: "text-sm text-muted-foreground" }, initial.draft_warning) : null,
-            initial.draft_request?.publication_error ? h("p", { role: "alert", "data-testid": "redmine-reply-publication-error" }, `Automatic publication needs review: ${initial.draft_request.publication_error}`) : null,
+            view.draft_warning ? h("p", { className: "text-sm text-muted-foreground" }, view.draft_warning) : null,
+            view.draft_request_warning ? h("p", { className: "text-sm text-muted-foreground" }, `Draft generation: ${view.draft_request_warning}`) : null,
+            view.draft_request?.publication_error ? h("p", { role: "alert", "data-testid": "redmine-reply-publication-error" }, `Automatic publication needs review: ${view.draft_request.publication_error}`) : null,
+            receipt && receipt.id !== review?.id ? h("details", { className: "rounded border p-3", "data-testid": "redmine-comment-previous-publication" },
+              h("summary", { className: "cursor-pointer text-sm" }, `Previously published · journal #${receipt.journal_id} · ${receipt.private_notes ? "Private note" : "Public comment"}`),
+              h("div", { className: "whitespace-pre-wrap break-words pt-2", "data-testid": "redmine-comment-previous-text" }, receipt.notes)) : null,
             !review ? h("div", { className: "space-y-3" },
-              h(Button, { variant: "outline", disabled: busy || draftRequested || initial.draft_request?.state === "uncertain" || initial.draft_request?.state === "sending" || (initial.draft_request?.state === "sent" && !initial.proposal), onClick: requestDraft, "data-testid": "redmine-reply-request" }, "Generate from current issue"),
+              h(Button, { variant: "outline", disabled: busy || draftRequested || view.can_request_draft !== true, onClick: requestDraft, "data-testid": "redmine-reply-request" }, "Generate from current issue"),
               h(Label, { htmlFor: "redmine-comment-notes" }, "Proposed reply"),
               h(Textarea, { id: "redmine-comment-notes", "data-testid": "redmine-comment-notes", value: notes, maxLength: 32768, rows: 10, disabled: busy, onChange: event => setNotes(event.target.value) }),
               h(Label, { htmlFor: "redmine-comment-visibility" }, "Visibility"),

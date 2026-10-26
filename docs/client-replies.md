@@ -32,6 +32,10 @@ An unconfirmed dispatch is retained for native inspection, never blindly replaye
 Paused connections, wrong steps, changed links and queued workflow admissions do
 not start new draft work. After admission or native recovery, an operator can use
 **Generate from current issue** to make an explicit request.
+After a verified completed response, an operator may request a new draft even if
+the previous response reported missing evidence or contained no valid proposal.
+Running agents, pending human input and unconfirmed dispatches still block another
+request; replaying the same request ID never starts new work.
 
 The drafting agent keeps evidence and validation limits in the task plan. Its
 final message contains only:
@@ -48,6 +52,10 @@ not a publishable draft. Writing prompts do not control publication permissions.
 
 Open **Review Redmine reply** from the task menu. The latest complete structured
 agent message can prefill the editor; you can also enter a proposal manually.
+When it differs from the last published reply, the new proposal opens in the
+editor and the previous publication stays in a separate read-only disclosure.
+**New comment** refreshes the latest proposal and does not prefill an already
+published response again.
 Review the linked issue, edit the text, and explicitly select public or private
 visibility. **Review exact comment** stores an immutable preview for this operator,
 task, issue, writer identity and issue-context fingerprint. It performs no Redmine

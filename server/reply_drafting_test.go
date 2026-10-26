@@ -164,3 +164,49 @@ func TestReplyDraftingIsDisabledByDefaultAndRejectsForgedTaskScope(t *testing.T)
 	result := commentAction(t, p, "comments.get", "human", nil)
 	require.NotNil(t, result["kind"])
 }
+
+func TestCompletedNonDraftReplyAllowsAnExplicitNewRequest(t *testing.T) {
+	for _, response := range []string{"BLOCKED: deployment evidence is missing.", "```redmine-comment\nmalformed json\n```"} {
+		t.Run(response, func(t *testing.T) {
+			p, h, f := newAutomaticReplyFixture(t)
+			require.NoError(t, p.OnEvent(context.Background(), movedReplyEvent("first-request")))
+			finishAutomaticDraft(t, p, h, false)
+			h.mu.Lock()
+			h.messages[len(h.messages)-1].Content = response
+			h.mu.Unlock()
+			view := commentAction(t, p, "comments.get", "human", nil)
+			require.Equal(t, true, view["can_request_draft"])
+			require.Nil(t, view["proposal"])
+			result := commentAction(t, p, "replies.request", "human", map[string]any{"request_id": "evidence-fixed"})
+			require.Equal(t, "manual:evidence-fixed", result["id"])
+			require.Equal(t, "sent", result["state"])
+			h.mu.Lock()
+			sends := len(h.sends)
+			h.mu.Unlock()
+			require.Equal(t, 2, sends)
+			puts, _ := f.snapshot()
+			require.Zero(t, puts)
+		})
+	}
+}
+
+func TestNewReplyWaitsForNativeCompletionEvenWithAValidProposal(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprint(pending), func(t *testing.T) {
+			p, h, _ := newAutomaticReplyFixture(t)
+			require.NoError(t, p.OnEvent(context.Background(), movedReplyEvent("first-request")))
+			finishAutomaticDraft(t, p, h, false)
+			if pending {
+				h.pending = true
+			} else {
+				h.sessionState = "RUNNING"
+			}
+			require.Equal(t, false, commentAction(t, p, "comments.get", "human", nil)["can_request_draft"])
+			result := commentAction(t, p, "replies.request", "human", map[string]any{"request_id": "while-active"})
+			require.Equal(t, "event:first-request", result["id"])
+			h.pending, h.sessionState = false, "WAITING_FOR_INPUT"
+			require.Equal(t, "event:first-request", commentAction(t, p, "replies.request", "human", map[string]any{"request_id": "while-active"})["id"])
+			require.Equal(t, "manual:after-completion", commentAction(t, p, "replies.request", "human", map[string]any{"request_id": "after-completion"})["id"])
+		})
+	}
+}

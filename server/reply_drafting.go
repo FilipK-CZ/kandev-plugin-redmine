@@ -200,21 +200,12 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 	if err != nil {
 		return nil, err
 	}
-	if found && last["state"] != "sending" && last["state"] != "uncertain" && last["state"] != "sent" && last["state"] != "denied" {
-		return nil, fmt.Errorf("redmine: stored draft dispatch is invalid; inspect its native task")
-	}
-	if found && (last["state"] == "sending" || last["state"] == "uncertain") {
-		return nil, fmt.Errorf("redmine: an earlier draft dispatch is uncertain; inspect its native task before requesting another")
-	}
-	if found && last["state"] == "sent" {
-		message, readErr := p.latestTaskMessage(ctx, taskID)
-		requestedValue, _ := last["requested_at"].(string)
-		requestedAt, _ := time.Parse(time.RFC3339Nano, requestedValue)
-		var messageAt time.Time
-		if message != nil {
-			messageAt, _ = time.Parse(time.RFC3339Nano, message.CreatedAt)
+	if found {
+		canRequest, err := p.canRequestReply(ctx, workspaceID, taskID, last)
+		if err != nil {
+			return nil, err
 		}
-		if readErr != nil || message == nil || message.AuthorType != "agent" || !messageAt.After(requestedAt) || parseCommentProposal(message.Content, issue.ID) == nil {
+		if !canRequest {
 			// Coalesce a second event/click while its original request is still
 			// meaningful work; retain the alias so a replay cannot launch later.
 			if err := p.Host().SetState(ctx, "task", taskID, key, last); err != nil {
@@ -260,6 +251,91 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 		return nil, err
 	}
 	return result, nil
+}
+
+func (p *redminePlugin) canRequestReply(ctx context.Context, workspaceID, taskID string, previous map[string]any) (bool, error) {
+	if previous == nil || previous["state"] == "denied" {
+		return true, nil
+	}
+	if previous["state"] == "sending" || previous["state"] == "uncertain" {
+		return false, fmt.Errorf("redmine: an earlier draft dispatch is uncertain; inspect its native task before requesting another")
+	}
+	if previous["state"] != "sent" {
+		return false, fmt.Errorf("redmine: stored draft dispatch is invalid; inspect its native task")
+	}
+	raw, err := json.Marshal(previous)
+	if err != nil {
+		return false, err
+	}
+	var request replyRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return false, err
+	}
+	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request)
+	return message != nil, err
+}
+
+// Completion is a native runtime fact, independent of whether the response is
+// a valid proposal, a refusal, or a request for missing evidence.
+func (p *redminePlugin) completedReplyMessage(ctx context.Context, workspaceID, taskID string, request replyRequest) (*pluginsdk.Message, error) {
+	message, err := p.latestTaskMessage(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if message == nil || message.AuthorType != "agent" {
+		return nil, nil
+	}
+	requestedAt, timeErr := time.Parse(time.RFC3339Nano, request.RequestedAt)
+	messageAt, messageErr := time.Parse(time.RFC3339Nano, message.CreatedAt)
+	if timeErr != nil || messageErr != nil {
+		return nil, fmt.Errorf("redmine: draft message timestamp is unavailable")
+	}
+	if !messageAt.After(requestedAt) {
+		return nil, nil
+	}
+	if request.SessionID == "" || request.ProfileID == "" || message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
+		return nil, fmt.Errorf("redmine: the final response does not match the drafting session")
+	}
+	sessions, info, err := p.Host().Sessions().List(ctx, pluginsdk.SessionFilter{TaskIDs: []string{taskID}, WorkspaceIDs: []string{workspaceID}}, pluginsdk.Page{Limit: 100})
+	if err != nil {
+		return nil, err
+	}
+	if info != nil && info.HasMore {
+		return nil, fmt.Errorf("redmine: session history exceeds the completion check limit")
+	}
+	var session *pluginsdk.Session
+	for i := range sessions {
+		s := &sessions[i]
+		if s.TaskID != taskID {
+			return nil, fmt.Errorf("redmine: unexpected session scope")
+		}
+		if s.ID == request.SessionID {
+			session = s
+		} else if s.State == "CREATED" || s.State == "STARTING" || s.State == "RUNNING" {
+			return nil, nil
+		}
+	}
+	if session == nil || session.AgentProfileID != request.ProfileID {
+		return nil, fmt.Errorf("redmine: the drafting session or profile changed")
+	}
+	if session.State == "FAILED" || session.State == "CANCELLED" {
+		return nil, fmt.Errorf("redmine: drafting session requires native recovery or human review")
+	}
+	if session.State != "WAITING_FOR_INPUT" && session.State != "COMPLETED" && session.State != "IDLE" {
+		return nil, nil
+	}
+	interactions, ok := p.Host().(pluginsdk.InteractionHost)
+	if !ok {
+		return nil, fmt.Errorf("redmine: the host cannot verify pending human interactions")
+	}
+	pending, more, err := interactions.Interactions().ListPending(ctx, pluginsdk.InteractionFilter{TaskIDs: []string{taskID}}, pluginsdk.Page{Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) > 0 || (more != nil && more.HasMore) {
+		return nil, nil
+	}
+	return message, nil
 }
 
 func (p *redminePlugin) saveReplyRequest(ctx context.Context, taskID string, result *replyRequest) error {

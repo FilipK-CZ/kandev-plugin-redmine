@@ -149,63 +149,16 @@ func (p *redminePlugin) publishAutomaticReply(ctx context.Context, workspaceID, 
 	if task.State != "WAITING_FOR_INPUT" && task.State != "COMPLETED" && task.State != "IDLE" {
 		return nil
 	}
-	sessions, info, err := p.Host().Sessions().List(ctx, pluginsdk.SessionFilter{TaskIDs: []string{taskID}, WorkspaceIDs: []string{workspaceID}}, pluginsdk.Page{Limit: 100})
+	message, err := p.completedReplyMessage(ctx, workspaceID, taskID, request)
 	if err != nil {
 		return hold(err.Error())
 	}
-	if info != nil && info.HasMore {
-		return hold("Session history exceeds the automatic publication limit.")
-	}
-	var session *pluginsdk.Session
-	for i := range sessions {
-		s := &sessions[i]
-		if s.TaskID != taskID {
-			return hold("Unexpected session scope.")
-		}
-		if s.ID == request.SessionID {
-			session = s
-		} else if s.State == "CREATED" || s.State == "STARTING" || s.State == "RUNNING" {
-			return nil
-		}
-	}
-	if session == nil || session.AgentProfileID != profileID {
-		return hold("The drafting session or profile changed.")
-	}
-	if session.State == "FAILED" || session.State == "CANCELLED" {
-		return hold("The drafting session requires native recovery or human review.")
-	}
-	if session.State != "WAITING_FOR_INPUT" && session.State != "COMPLETED" && session.State != "IDLE" {
-		return nil
-	}
-	interactions, ok := p.Host().(pluginsdk.InteractionHost)
-	if !ok {
-		return hold("The host cannot verify pending human interactions.")
-	}
-	pending, more, err := interactions.Interactions().ListPending(ctx, pluginsdk.InteractionFilter{TaskIDs: []string{taskID}}, pluginsdk.Page{Limit: 1})
-	if err != nil {
-		return hold(err.Error())
-	}
-	if len(pending) > 0 || (more != nil && more.HasMore) {
-		return nil
-	}
-	message, err := p.latestTaskMessage(ctx, taskID)
-	if err != nil {
-		return hold(err.Error())
-	}
-	if message == nil || message.AuthorType != "agent" {
-		return nil
-	}
-	requestedAt, timeErr := time.Parse(time.RFC3339Nano, request.RequestedAt)
-	messageAt, messageErr := time.Parse(time.RFC3339Nano, message.CreatedAt)
-	if timeErr != nil || messageErr != nil {
-		return hold("The draft message timestamp is unavailable.")
-	}
-	if !messageAt.After(requestedAt) {
+	if message == nil {
 		return nil
 	}
 	proposal := parseCommentProposal(message.Content, issue.ID)
 	hash := sha256.Sum256([]byte(request.ID))
-	if proposal == nil || proposal.RequestID != hex.EncodeToString(hash[:]) || message.SessionID != request.SessionID || message.ID == "" || message.TurnID == "" {
+	if proposal == nil || proposal.RequestID != hex.EncodeToString(hash[:]) {
 		return hold("The final reply cannot be verified against this draft request. Review it manually.")
 	}
 	if draft == nil {

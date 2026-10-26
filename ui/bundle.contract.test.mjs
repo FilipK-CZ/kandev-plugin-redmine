@@ -106,6 +106,73 @@ test("editing a prepared comment invalidates its approval before accepting edits
   assert.deepEqual(calls, ["comments.get", "comments.get", "comments.discard"]);
 });
 
+test("a completed reply without a proposal can request a fresh draft", async () => {
+  const calls = [];
+  const dialog = await commentDialog(async key => {
+    calls.push(key);
+    if (key === "comments.get") return { issue: { id: 42 }, draft_request: { state: "sent" }, can_request_draft: true };
+    if (key === "replies.request") return { state: "sent" };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-reply-request").props.disabled, false);
+  await dialog.find("redmine-reply-request").props.onClick();
+  assert.deepEqual(calls, ["comments.get", "replies.request"]);
+});
+
+test("a fresh proposal opens in the editor while retaining the previous publication", async () => {
+  const calls = [];
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const proposal = { issue_id: 42, notes: "New verified reply", private_notes: true };
+  const dialog = await commentDialog(async (key, context) => {
+    calls.push({ key, context });
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, proposal, current_id: receipt.id, context_hash: "fresh-context", can_request_draft: true };
+    if (key === "comments.prepare") return { id: "new-preview", state: "prepared", notes: proposal.notes, private_notes: true };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-notes")?.props.value, proposal.notes);
+  assert.equal(dialog.select().props.value, "private");
+  assert.equal(dialog.find("redmine-comment-previous-text").children[0], receipt.notes);
+  assert.equal(dialog.find("redmine-comment-approve"), undefined);
+  await dialog.find("redmine-comment-preview").props.onClick();
+  assert.deepEqual(calls.at(-1).context.body, { issue_id: 42, notes: proposal.notes, private_notes: true, expected_id: receipt.id, expected_context_hash: "fresh-context" });
+  assert.equal(calls.some(call => call.key === "comments.approve"), false);
+});
+
+test("New comment loads a proposal that arrived while the old receipt was open", async () => {
+  let reads = 0;
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, current_id: receipt.id, proposal: ++reads > 1 ? { notes: "New reply after refresh", private_notes: true } : null };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.equal(dialog.find("redmine-comment-notes").props.value, "New reply after refresh");
+  assert.equal(dialog.select().props.value, "private");
+  assert.equal(dialog.find("redmine-comment-previous-text").children[0], receipt.notes);
+});
+
+test("New comment does not prefill the already published proposal again", async () => {
+  const receipt = { id: "old-publication", state: "published", notes: "Previously sent reply", private_notes: false, journal_id: 123 };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft: receipt, current_id: receipt.id, proposal: { notes: receipt.notes, private_notes: false } };
+    throw new Error(`unexpected action ${key}`);
+  });
+  await dialog.find("redmine-comment-edit").props.onClick();
+  assert.equal(dialog.find("redmine-comment-notes").props.value, "");
+  assert.equal(dialog.select().props.value, "");
+});
+
+test("new proposals never replace an operator's prepared preview implicitly", async () => {
+  const draft = { id: "human-preview", state: "prepared", notes: "Operator's reviewed text", private_notes: false };
+  const dialog = await commentDialog(async key => {
+    if (key === "comments.get") return { issue: { id: 42 }, draft, current_id: draft.id, can_approve: true, proposal: { notes: "A newer generated reply", private_notes: true } };
+    throw new Error(`unexpected action ${key}`);
+  });
+  assert.equal(dialog.find("redmine-comment-preview-text").children[0], draft.notes);
+  assert.equal(dialog.find("redmine-comment-notes"), undefined);
+  assert.ok(dialog.find("redmine-comment-approve"));
+});
+
 async function replySettingsForm(autoPublish) {
   const { makeSettingsComponent } = await loadBundleTestHooks();
   const calls = [];

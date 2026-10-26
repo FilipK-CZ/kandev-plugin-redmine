@@ -360,9 +360,19 @@ func (p *redminePlugin) handleCommentGet(ctx context.Context, req *pluginsdk.Plu
 		return nil, err
 	}
 	proposal, warning := p.latestCommentProposal(ctx, req.Context.TaskID, issue.ID)
-	request, _, err := p.Host().GetState(ctx, "task", req.Context.TaskID, replyLatestKey)
+	request, requestFound, err := p.Host().GetState(ctx, "task", req.Context.TaskID, replyLatestKey)
 	if err != nil {
 		return nil, err
+	}
+	if !requestFound {
+		request = nil
+	}
+	canRequest, requestErr := p.canRequestReply(ctx, req.Context.WorkspaceID, req.Context.TaskID, request)
+	requestWarning := ""
+	if requestErr != nil {
+		requestWarning = requestErr.Error()
+	} else if !canRequest {
+		requestWarning = "The previous draft is still active or waiting for human input."
 	}
 	currentID := ""
 	if draft != nil {
@@ -379,6 +389,7 @@ func (p *redminePlugin) handleCommentGet(ctx context.Context, req *pluginsdk.Plu
 		"draft": draft, "proposal": proposal, "draft_warning": warning,
 		"can_approve": draft != nil && draft.ActorID == req.Context.ActorID && draft.State == "prepared" && draft.PolicyID == "",
 		"current_id":  currentID, "context_hash": commentContextHash(issue), "draft_request": request,
+		"can_request_draft": canRequest, "draft_request_warning": requestWarning,
 	})
 }
 
