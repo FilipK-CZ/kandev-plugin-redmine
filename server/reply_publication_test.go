@@ -39,7 +39,7 @@ func (r automaticSessions) List(_ context.Context, filter pluginsdk.SessionFilte
 	if len(filter.TaskIDs) != 1 || filter.TaskIDs[0] != "task-1" || len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" {
 		return nil, nil, fmt.Errorf("unexpected session scope")
 	}
-	return []pluginsdk.Session{{ID: "draft-session", TaskID: "task-1", AgentProfileID: r.host.sessionProfile, State: r.host.sessionState}}, nil, nil
+	return []pluginsdk.Session{{ID: "draft-session", TaskID: "task-1", AgentProfileID: r.host.sessionProfile, State: r.host.sessionState, StartedAt: "2026-10-26T12:00:00Z"}}, nil, nil
 }
 
 type automaticInteractions struct {

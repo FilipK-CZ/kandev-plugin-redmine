@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.4.0] - Unreleased
+## [0.4.1] - Unreleased
+
+- Check for an initialized session before recording a draft dispatch, so an unopened task does not become permanently uncertain without sending anything.
+- Send drafts explicitly to the newest live session of the configured read-only profile; reject incomplete history, wrong task scope and competing active sessions.
+- Preserve existing uncertain dispatches for native inspection without replaying them.
+
+## [0.4.0] - 2026-10-26
 
 - Add configurable workflow-driven reply drafts with live public issue context.
 - Add immutable operator previews and explicit public/private comment approval.

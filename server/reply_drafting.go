@@ -217,6 +217,10 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 			return &previous, nil
 		}
 	}
+	sessionID, err := p.replyTargetSession(ctx, workspaceID, taskID, profileID)
+	if err != nil {
+		return nil, err
+	}
 	var publicJournals []issues.Journal
 	for _, journal := range issue.Journals {
 		if !journal.PrivateNotes {
@@ -231,26 +235,66 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 		return nil, fmt.Errorf("redmine: issue context exceeds 128 KiB; prepare focused input manually")
 	}
 	prompt := fmt.Sprintf(replyDraftInstructions, settings.PromptName, issue.ID, hex.EncodeToString(hash[:]), evidence)
-	result := &replyRequest{ID: requestID, IssueID: issue.ID, State: "sending", RequestedAt: time.Now().UTC().Format(time.RFC3339Nano), ProfileID: profileID, ContextHash: commentContextHash(issue), ConnectionRevision: conn.Revision}
+	result := &replyRequest{ID: requestID, IssueID: issue.ID, State: "sending", RequestedAt: time.Now().UTC().Format(time.RFC3339Nano), SessionID: sessionID, ProfileID: profileID, ContextHash: commentContextHash(issue), ConnectionRevision: conn.Revision}
 	if settings.AutoPublish && settings.PolicyID != "" && settings.AuthorizedBy != "" {
 		result.PolicyID, result.PublicationState = settings.PolicyID, "waiting"
 	}
 	if err := p.saveReplyRequest(ctx, taskID, result); err != nil {
 		return nil, err
 	}
-	dispatch, sendErr := p.Host().Messages().Send(ctx, taskID, "", prompt)
+	dispatch, sendErr := p.Host().Messages().Send(ctx, taskID, sessionID, prompt)
 	result.State = "uncertain"
 	if status.Code(sendErr) == codes.PermissionDenied || status.Code(sendErr) == codes.Unauthenticated {
 		result.State = "denied"
 	}
-	if sendErr == nil && dispatch != nil && dispatch.SessionID != "" && (dispatch.Status == "queued" || dispatch.Status == "sent" || dispatch.Status == "started") {
+	if sendErr == nil && dispatch != nil && dispatch.SessionID == sessionID && (dispatch.Status == "queued" || dispatch.Status == "sent" || dispatch.Status == "started") {
 		result.State = "sent"
-		result.SessionID = dispatch.SessionID
 	}
 	if err := p.saveReplyRequest(ctx, taskID, result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (p *redminePlugin) replyTargetSession(ctx context.Context, workspaceID, taskID, profileID string) (string, error) {
+	sessions, page, err := p.Host().Sessions().List(ctx, pluginsdk.SessionFilter{TaskIDs: []string{taskID}, WorkspaceIDs: []string{workspaceID}}, pluginsdk.Page{Limit: 100})
+	if err != nil {
+		return "", err
+	}
+	if page != nil && page.HasMore {
+		return "", fmt.Errorf("redmine: session history exceeds the drafting check limit")
+	}
+	var sessionID string
+	var newest time.Time
+	for _, session := range sessions {
+		if session.TaskID != taskID {
+			return "", fmt.Errorf("redmine: unexpected drafting session scope")
+		}
+		if session.AgentProfileID != profileID {
+			continue
+		}
+		switch session.State {
+		case "CREATED", "STARTING", "RUNNING", "WAITING_FOR_INPUT", "IDLE":
+		default:
+			continue
+		}
+		started, err := time.Parse(time.RFC3339Nano, session.StartedAt)
+		if err != nil || session.ID == "" {
+			return "", fmt.Errorf("redmine: drafting session identity or timestamp is unavailable")
+		}
+		if sessionID == "" || started.After(newest) {
+			sessionID, newest = session.ID, started
+		}
+	}
+	if sessionID == "" {
+		return "", fmt.Errorf("redmine: open this task in Kandev and initialize a session with the communication step's read-only profile, then use Generate from current issue")
+	}
+	for _, session := range sessions {
+		if session.ID != sessionID && (session.State == "RUNNING" || session.State == "STARTING") {
+			return "", fmt.Errorf("redmine: another session is active; wait for it before requesting a draft")
+		}
+	}
+	return sessionID, nil
 }
 
 func (p *redminePlugin) canRequestReply(ctx context.Context, workspaceID, taskID string, previous map[string]any) (bool, error) {

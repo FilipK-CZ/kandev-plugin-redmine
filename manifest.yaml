@@ -5,7 +5,7 @@
 # every route kandev serves for this plugin (/api/plugins/<id>/...).
 id: "kandev-plugin-redmine"
 api_version: 1
-version: "0.4.0"
+version: "0.4.1"
 display_name: "Redmine"
 description: "Connect a Redmine instance: link kandev tasks to Redmine issues, sync status both ways, and watch for new issues."
 author: "yattdev"

@@ -26,7 +26,16 @@ replies without per-comment approval. The setting is independent of the empty-st
 drafting switch and the integration's overall enabled/paused switch.
 
 Entering the step sends one draft request with live issue details and public
-journals to the current task. Private journals are omitted. Issue text is data,
+journals to the newest live session of its configured read-only profile. The
+session ID is pinned explicitly; the task's default session may still belong to
+an earlier implementation step and is never used implicitly. A task with no
+matching session is rejected before recording a dispatch: open it in Kandev,
+initialize a session of the communication profile, then select **Generate from
+current issue**. Competing active sessions and incomplete session history also
+block new dispatches. Existing uncertain attempts remain held for native
+inspection; the upgrade does not replay or clear them.
+
+Private journals are omitted. Issue text is data,
 not authority. Repeated events and clicks coalesce while a request is active.
 An unconfirmed dispatch is retained for native inspection, never blindly replayed.
 Paused connections, wrong steps, changed links and queued workflow admissions do
