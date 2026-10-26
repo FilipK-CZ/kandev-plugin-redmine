@@ -173,7 +173,7 @@ test("new proposals never replace an operator's prepared preview implicitly", as
   assert.ok(dialog.find("redmine-comment-approve"));
 });
 
-async function replySettingsForm(autoPublish) {
+async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSection") {
   const { makeSettingsComponent } = await loadBundleTestHooks();
   const calls = [];
   let cursor = 0;
@@ -193,20 +193,26 @@ async function replySettingsForm(autoPublish) {
     api: { async invokeAction(key, context) {
       calls.push({ key, context });
       if (key === "replies.settings.get") return { workflow_id: "workflow-1", step_id: "reply-step", prompt_name: "client-reply", ...(autoPublish === undefined ? {} : { auto_publish: autoPublish }) };
-      if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }] };
+      if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }, { id: "workflow-bug", name: "Bugs", steps: [{ id: "diagnosis", name: "Diagnosis" }] }] };
       if (key === "replies.settings.save") return context.body;
+      if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], live_statuses: [], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
+      if (key === "fieldmapping.save") return { saved: true };
       throw new Error(`unexpected action ${key}`);
     } },
   };
   const all = node => !node || typeof node !== "object" ? [] : [node, ...node.children.flat(Infinity).flatMap(all)];
   const page = makeSettingsComponent(host)({ workspaceId: "workspace-1" });
-  const component = all(page).find(node => node.type?.name === "ReplyDraftingSection");
+  const component = all(page).find(node => node.type?.name === sectionName);
   assert.ok(component);
   section = true; hooks = [];
   const render = () => { cursor = 0; return component.type(component.props); };
   render(); effects.forEach(effect => effect());
   await new Promise(resolve => setImmediate(resolve));
-  return { calls, find: id => all(render()).find(node => node.props["data-testid"] === id) };
+  return {
+    calls,
+    find: id => all(render()).find(node => node.props["data-testid"] === id || node.props.id === id),
+    select: (id, value) => all(render()).find(node => node.type === "Select" && node.children.flat(Infinity).some(child => child?.props?.id === id || child?.props?.["data-testid"] === id)).props.onValueChange(value),
+  };
 }
 
 test("reply publication defaults to human approval and saves either mode explicitly", async () => {
@@ -226,6 +232,46 @@ test("reply publication defaults to human approval and saves either mode explici
 test("reply publication loads the saved automatic mode without silently resetting it", async () => {
   const form = await replySettingsForm(true);
   assert.equal(form.find("redmine-reply-auto-publish").props.checked, true);
+});
+
+test("additional communication stages preserve other stages and default to manual approval", async () => {
+  const form = await replySettingsForm(true);
+  form.find("redmine-reply-add").props.onClick();
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, false);
+  form.select("redmine-reply-workflow", "workflow-bug");
+  form.select("redmine-reply-step", "diagnosis");
+  form.find("redmine-reply-prompt").props.onChange({ target: { value: "diagnosis-reply" } });
+  await form.find("redmine-reply-save").props.onClick();
+  const saved = form.calls.at(-1).context.body;
+  assert.equal(saved.auto_publish, true);
+  assert.equal(saved.prompt_name, "client-reply");
+  assert.equal(saved.additional_steps.length, 1);
+  assert.equal(saved.additional_steps[0].auto_publish, false);
+  assert.equal(saved.additional_steps[0].prompt_name, "diagnosis-reply");
+  assert.equal(saved.additional_steps[0].workflow_id, "workflow-bug");
+  assert.equal(saved.additional_steps[0].step_id, "diagnosis");
+  form.find("redmine-reply-entry-0").props.onClick();
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, true);
+  form.find("redmine-reply-entry-1").props.onClick();
+  form.find("redmine-reply-remove").props.onClick();
+  await form.find("redmine-reply-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.additional_steps.length, 0);
+  assert.equal(form.calls.at(-1).context.body.auto_publish, true);
+});
+
+test("tracker routing saves explicit tracker and entry without replacing default workflow", async () => {
+  const form = await replySettingsForm(undefined, "FieldMappingSection");
+  form.find("redmine-route-add").props.onClick();
+  form.select("redmine-route-tracker-0", "8");
+  form.select("redmine-route-workflow-0", "workflow-bug");
+  form.select("redmine-route-step-0", "diagnosis");
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.equal(form.calls.at(-1).key, "fieldmapping.save");
+  assert.equal(form.calls.at(-1).context.body.workflow_id, "workflow-1");
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes, [{ redmine_tracker_id: 8, workflow_id: "workflow-bug", workflow_step_id: "diagnosis" }]);
+  form.select("redmine-route-workflow-0", "workflow-1");
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.tracker_routes[0].workflow_step_id, "", "changing workflow must not retain a foreign step");
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"sync"
 
+	"kandev-plugin-redmine/internal/fieldmapping"
 	"kandev-plugin-redmine/internal/issues"
 	"kandev-plugin-redmine/internal/tasklink"
 
@@ -61,6 +62,8 @@ type Watch struct {
 	// backwards-compatible saved watches.
 	Filters          []Filter
 	PriorityMappings map[int]string
+	// Resolved from current workspace settings on every poll, not watch state.
+	TrackerRoutes    []fieldmapping.TrackerRoute
 	MaxInflightTasks int // 0 = unlimited
 	Enabled          bool
 }
@@ -316,6 +319,12 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 }
 
 func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
+	for _, route := range w.TrackerRoutes {
+		if route.RedmineTrackerID == issue.TrackerID {
+			w.WorkflowID, w.WorkflowStepID = route.WorkflowID, route.WorkflowStepID
+			break
+		}
+	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
 		WorkspaceID: w.WorkspaceID,
 		WorkflowID:  w.WorkflowID,

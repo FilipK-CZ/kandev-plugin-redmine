@@ -41,9 +41,17 @@ type CustomField struct {
 
 // Mapping is the full persisted per-workspace field mapping.
 type Mapping struct {
-	WorkflowID string            `json:"workflow_id"`
-	Statuses   []StatusMapping   `json:"statuses"`
-	Priorities []PriorityMapping `json:"priorities"`
+	WorkflowID    string            `json:"workflow_id"`
+	Statuses      []StatusMapping   `json:"statuses"`
+	Priorities    []PriorityMapping `json:"priorities"`
+	TrackerRoutes []TrackerRoute    `json:"tracker_routes,omitempty"`
+}
+
+// TrackerRoute changes placement only for newly imported watcher tasks.
+type TrackerRoute struct {
+	RedmineTrackerID int    `json:"redmine_tracker_id"`
+	WorkflowID       string `json:"workflow_id"`
+	WorkflowStepID   string `json:"workflow_step_id"`
 }
 
 // WorkflowStepForStatus resolves the inbound direction: a Redmine status ID
@@ -150,6 +158,10 @@ func DeriveCustomFieldsFromIssues(issuesFields [][]CustomField) []CustomField {
 }
 
 func (m Mapping) toMap() map[string]any {
+	routes := make([]any, len(m.TrackerRoutes))
+	for i, route := range m.TrackerRoutes {
+		routes[i] = map[string]any{"redmine_tracker_id": route.RedmineTrackerID, "workflow_id": route.WorkflowID, "workflow_step_id": route.WorkflowStepID}
+	}
 	statuses := make([]any, len(m.Statuses))
 	for i, s := range m.Statuses {
 		statuses[i] = map[string]any{
@@ -168,14 +180,20 @@ func (m Mapping) toMap() map[string]any {
 		}
 	}
 	return map[string]any{
-		"workflow_id": m.WorkflowID,
-		"statuses":    statuses,
-		"priorities":  priorities,
+		"workflow_id":    m.WorkflowID,
+		"statuses":       statuses,
+		"priorities":     priorities,
+		"tracker_routes": routes,
 	}
 }
 
 func mappingFromMap(m map[string]any) Mapping {
 	out := Mapping{WorkflowID: asString(m["workflow_id"])}
+	for _, raw := range asSlice(m["tracker_routes"]) {
+		if row, ok := raw.(map[string]any); ok {
+			out.TrackerRoutes = append(out.TrackerRoutes, TrackerRoute{RedmineTrackerID: asInt(row["redmine_tracker_id"]), WorkflowID: asString(row["workflow_id"]), WorkflowStepID: asString(row["workflow_step_id"])})
+		}
+	}
 	for _, raw := range asSlice(m["statuses"]) {
 		row, ok := raw.(map[string]any)
 		if !ok {

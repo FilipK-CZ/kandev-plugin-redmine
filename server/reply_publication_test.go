@@ -66,12 +66,15 @@ type automaticTasks struct {
 }
 
 func (r automaticTasks) List(ctx context.Context, filter pluginsdk.TaskFilter, _ pluginsdk.Page) ([]pluginsdk.Task, *pluginsdk.PageInfo, error) {
-	if len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" || len(filter.WorkflowIDs) != 1 || filter.WorkflowIDs[0] != "wf-1" {
+	if len(filter.WorkspaceIDs) != 1 || filter.WorkspaceIDs[0] != "ws-1" || len(filter.WorkflowIDs) != 1 {
 		return nil, nil, fmt.Errorf("unexpected task scope")
 	}
 	task, err := r.TaskReader.Get(ctx, "task-1")
 	if err != nil {
 		return nil, nil, err
+	}
+	if task.WorkflowID != filter.WorkflowIDs[0] {
+		return nil, nil, fmt.Errorf("unexpected workflow scope")
 	}
 	return []pluginsdk.Task{*task}, nil, nil
 }

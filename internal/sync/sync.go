@@ -38,7 +38,7 @@ type Options struct {
 	AutoStatusWriteback  bool
 	SyncTitleDescription bool
 	// Derived from reply settings, never persisted as a general sync option.
-	PreserveWorkflowStepID string
+	PreserveWorkflowStepIDs []string
 }
 
 // SaveOptions persists the two sync toggles for workspaceID.
@@ -204,8 +204,15 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 	// already in its mapped workflow step. Move emits a task update even for a
 	// same-step request, so this comparison keeps the inclusive cursor overlap
 	// from churning an otherwise synchronized task on every poll.
-	humanGate := opts.PreserveWorkflowStepID != "" && task.WorkflowStepID == opts.PreserveWorkflowStepID
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && !statusEcho && !humanGate && task.WorkflowStepID != stepID {
+	humanGate := false
+	for _, stepID := range opts.PreserveWorkflowStepIDs {
+		if task.WorkflowStepID == stepID {
+			humanGate = true
+		}
+	}
+	// Routed workflows own their transitions; default status mapping must not move them back.
+	sameWorkflow := task.WorkflowID == mapping.WorkflowID
+	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && sameWorkflow && !statusEcho && !humanGate && task.WorkflowStepID != stepID {
 		plan.workflowStepID = stepID
 	}
 	if opts.SyncTitleDescription {

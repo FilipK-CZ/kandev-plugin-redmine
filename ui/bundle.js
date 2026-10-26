@@ -582,6 +582,7 @@ function makeSettingsComponent(host) {
     const [statusToAdd, setStatusToAdd] = React.useState("");
     const [statusSteps, setStatusSteps] = React.useState({});
     const [priorityMap, setPriorityMap] = React.useState({});
+    const [trackerRoutes, setTrackerRoutes] = React.useState([]);
     const [saving, setSaving] = React.useState(false);
 
     const load = React.useCallback(async () => {
@@ -596,6 +597,7 @@ function makeSettingsComponent(host) {
           invoke("workflows.list", workspaceId, {}),
         ]);
         setLive(fields);
+        setTrackerRoutes(fields.tracker_routes || []);
         const availableWorkflows = (wf && wf.workflows) || [];
         setWorkflows(availableWorkflows);
         setWorkflowId(fields.workflow_id || (availableWorkflows[0] && availableWorkflows[0].id) || "");
@@ -667,7 +669,7 @@ function makeSettingsComponent(host) {
       }));
       setSaving(true);
       try {
-        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, priorities });
+        await invoke("fieldmapping.save", workspaceId, { workflow_id: workflowId, statuses, priorities, tracker_routes: trackerRoutes });
         toast.success("Field mapping saved.");
       } catch (err) {
         toast.error(errorMessage(err));
@@ -688,6 +690,28 @@ function makeSettingsComponent(host) {
       h(
         CardContent,
         { className: "space-y-6" },
+        h("div", { className: "space-y-3", "data-testid": "redmine-tracker-routes" },
+          h("h4", { className: "text-sm font-medium" }, "Tracker → new task workflow"),
+          h("p", { className: "text-sm text-muted-foreground" }, "Overrides placement for new watcher imports only. Existing tasks stay in place. Routed workflows manage their own stages; default Redmine status mapping does not move them. Entry steps must not auto-start an agent."),
+          trackerRoutes.map((route, index) => {
+            const change = patch => setTrackerRoutes(trackerRoutes.map((item, i) => i === index ? { ...item, ...patch } : item));
+            const steps = workflows.find(workflow => workflow.id === route.workflow_id)?.steps || [];
+            return h("div", { key: index, className: "grid gap-2 rounded border p-3 sm:grid-cols-4" },
+              h("div", null, h(Label, { htmlFor: `redmine-route-tracker-${index}` }, "Tracker"),
+                h(Select, { value: String(route.redmine_tracker_id || "__none__"), onValueChange: value => change({ redmine_tracker_id: value === "__none__" ? 0 : Number(value) }) },
+                  h(SelectTrigger, { id: `redmine-route-tracker-${index}`, "data-testid": `redmine-route-tracker-${index}` }, h(SelectValue, { placeholder: "Choose tracker" })),
+                  h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose tracker"), (live.live_trackers || []).map(tracker => h(SelectItem, { key: tracker.id, value: String(tracker.id) }, tracker.name))))),
+              h("div", null, h(Label, { htmlFor: `redmine-route-workflow-${index}` }, "Workflow"),
+                h(Select, { value: route.workflow_id || "__none__", onValueChange: value => change({ workflow_id: value === "__none__" ? "" : value, workflow_step_id: "" }) },
+                  h(SelectTrigger, { id: `redmine-route-workflow-${index}`, "data-testid": `redmine-route-workflow-${index}` }, h(SelectValue, { placeholder: "Choose workflow" })),
+                  h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose workflow"), workflows.map(workflow => h(SelectItem, { key: workflow.id, value: workflow.id }, workflow.name))))),
+              h("div", null, h(Label, { htmlFor: `redmine-route-step-${index}` }, "Entry step"),
+                h(Select, { value: route.workflow_step_id || "__none__", onValueChange: value => change({ workflow_step_id: value === "__none__" ? "" : value }) },
+                  h(SelectTrigger, { id: `redmine-route-step-${index}`, "data-testid": `redmine-route-step-${index}` }, h(SelectValue, { placeholder: "Choose entry step" })),
+                  h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Choose entry step"), steps.map(step => h(SelectItem, { key: step.id, value: step.id }, step.name))))),
+              h(Button, { type: "button", variant: "ghost", disabled: saving, "data-testid": `redmine-route-remove-${index}`, onClick: () => setTrackerRoutes(trackerRoutes.filter((_, i) => i !== index)) }, "Remove route"));
+          }),
+          h(Button, { type: "button", variant: "outline", disabled: saving || trackerRoutes.length >= 20, "data-testid": "redmine-route-add", onClick: () => setTrackerRoutes([...trackerRoutes, { redmine_tracker_id: 0, workflow_id: "", workflow_step_id: "" }]) }, "Add tracker route")),
         h("div", { className: "space-y-2" },
           h(Label, { htmlFor: "redmine-mapping-workflow" }, "Kandev workflow"),
           h(Select, { value: workflowId, onValueChange: (nextWorkflowId) => {
@@ -881,9 +905,10 @@ function makeSettingsComponent(host) {
     const [loading, setLoading] = React.useState(true);
     const [saving, setSaving] = React.useState(false);
     const [error, setError] = React.useState(null);
+    const [selectedIndex, setSelectedIndex] = React.useState(0);
     React.useEffect(() => {
       let active = true;
-      setLoading(true); setSaving(false); setError(null);
+      setLoading(true); setSaving(false); setError(null); setSelectedIndex(0);
       if (!connected) { setLoading(false); return () => { active = false; }; }
       Promise.all([invoke("replies.settings.get", workspaceId, {}), invoke("workflows.list", workspaceId, {})]).then(([saved, options]) => {
         if (active) { setSettings({ ...saved, prompt_name: saved.prompt_name || "client-reply", auto_publish: saved.auto_publish === true }); setWorkflows(options.workflows || []); }
@@ -892,28 +917,38 @@ function makeSettingsComponent(host) {
     }, [workspaceId, connected]);
     const save = async () => {
       setSaving(true); setError(null);
-      try { const saved = await invoke("replies.settings.save", workspaceId, settings); if (currentWorkspace.current === workspaceId) { setSettings(saved); toast.success(saved.auto_publish ? "Automatic publishing enabled for new draft requests." : "Reply drafting saved. Publishing requires human approval."); } }
+      try { const saved = await invoke("replies.settings.save", workspaceId, settings); if (currentWorkspace.current === workspaceId) { setSettings(saved); toast.success("Communication steps saved. Each step retains its own publishing mode."); } }
       catch (err) { if (currentWorkspace.current === workspaceId) setError(errorMessage(err)); }
       finally { if (currentWorkspace.current === workspaceId) setSaving(false); }
     };
-    const steps = workflows.find(workflow => workflow.id === settings.workflow_id)?.steps || [];
+    const entries = [settings, ...(settings.additional_steps || [])];
+    const selected = entries[selectedIndex] || settings;
+    const change = patch => setSettings(selectedIndex === 0 ? { ...settings, ...patch } : { ...settings, additional_steps: settings.additional_steps.map((entry, index) => index === selectedIndex - 1 ? { ...entry, ...patch } : entry) });
+    const steps = workflows.find(workflow => workflow.id === selected.workflow_id)?.steps || [];
     return h(Card, { id: "redmine-reply-settings" },
-      h(CardHeader, null, h(CardTitle, null, "Client replies"), h(CardDescription, null, "Entering this step sends live public issue history to its read-only agent. Choose whether completed replies require human approval or are published automatically.")),
+      h(CardHeader, null, h(CardTitle, null, "Client replies"), h(CardDescription, null, "Configure independent communication steps across workflows. Each uses live public issue history and its own saved prompt and publishing mode.")),
       h(CardContent, { className: "space-y-3" },
+        h("div", { className: "flex flex-wrap gap-2" }, entries.map((entry, index) => {
+          const workflow = workflows.find(item => item.id === entry.workflow_id);
+          const step = workflow?.steps?.find(item => item.id === entry.step_id);
+          return h(Button, { key: index, type: "button", variant: selectedIndex === index ? "default" : "outline", disabled: saving || loading, "data-testid": `redmine-reply-entry-${index}`, onClick: () => setSelectedIndex(index) }, step ? `${workflow.name} / ${step.name}` : index === 0 ? "Default entry (disabled)" : "New communication step");
+        })),
+        h(Button, { type: "button", variant: "outline", disabled: !connected || saving || loading || entries.length >= 20, "data-testid": "redmine-reply-add", onClick: () => { setSettings({ ...settings, additional_steps: [...(settings.additional_steps || []), { workflow_id: "", step_id: "", prompt_name: "client-reply", auto_publish: false }] }); setSelectedIndex(entries.length); } }, "Add communication step"),
+        selectedIndex > 0 ? h(Button, { type: "button", variant: "ghost", disabled: saving, "data-testid": "redmine-reply-remove", onClick: () => { setSettings({ ...settings, additional_steps: settings.additional_steps.filter((_, index) => index !== selectedIndex - 1) }); setSelectedIndex(0); } }, "Remove selected step") : null,
         h(Label, { htmlFor: "redmine-reply-workflow" }, "Drafting workflow"),
-        h(Select, { disabled: !connected || loading || saving, value: settings.workflow_id || "__none__", onValueChange: value => setSettings({ ...settings, workflow_id: value === "__none__" ? "" : value, step_id: "", auto_publish: false }) },
+        h(Select, { disabled: !connected || loading || saving, value: selected.workflow_id || "__none__", onValueChange: value => change({ workflow_id: value === "__none__" ? "" : value, step_id: "", auto_publish: false }) },
           h(SelectTrigger, { id: "redmine-reply-workflow" }, h(SelectValue, { placeholder: "Choose workflow" })),
           h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Disabled"), workflows.map(workflow => h(SelectItem, { key: workflow.id, value: workflow.id }, workflow.name)))),
         h(Label, { htmlFor: "redmine-reply-step" }, "Communication step"),
-        h(Select, { disabled: !connected || loading || saving || !settings.workflow_id, value: settings.step_id || "__none__", onValueChange: value => setSettings({ ...settings, step_id: value === "__none__" ? "" : value, auto_publish: value === "__none__" ? false : settings.auto_publish }) },
+        h(Select, { disabled: !connected || loading || saving || !selected.workflow_id, value: selected.step_id || "__none__", onValueChange: value => change({ step_id: value === "__none__" ? "" : value, auto_publish: value === "__none__" ? false : selected.auto_publish }) },
           h(SelectTrigger, { id: "redmine-reply-step" }, h(SelectValue, { placeholder: "Choose step" })),
           h(SelectContent, null, h(SelectItem, { value: "__none__" }, "Disabled"), steps.map(step => h(SelectItem, { key: step.id, value: step.id }, step.name)))),
         h(Label, { htmlFor: "redmine-reply-prompt" }, "Saved prompt name"),
-        h(Input, { id: "redmine-reply-prompt", value: settings.prompt_name, disabled: !connected || loading || saving, onChange: event => setSettings({ ...settings, prompt_name: event.target.value }) }),
+        h(Input, { id: "redmine-reply-prompt", value: selected.prompt_name, disabled: !connected || loading || saving, onChange: event => change({ prompt_name: event.target.value }) }),
         h("div", { className: "flex items-center justify-between gap-4" },
           h(Label, { htmlFor: "redmine-reply-auto-publish" }, "Publish replies automatically"),
-          h(Switch, { id: "redmine-reply-auto-publish", "data-testid": "redmine-reply-auto-publish", "aria-describedby": "redmine-reply-mode-description", checked: settings.auto_publish === true, disabled: !connected || loading || saving || !settings.step_id, onCheckedChange: checked => setSettings({ ...settings, auto_publish: checked }) })),
-        h("p", { id: "redmine-reply-mode-description", role: settings.auto_publish ? "alert" : undefined, className: "text-sm text-muted-foreground" }, settings.auto_publish ? "After saving, new completed replies can publish public comments or private notes without human approval. Existing drafts are not sent. Turning this off stops new automatic submissions; a comment already being submitted cannot be recalled." : "Human approval required (default). Every comment needs an exact preview and explicit approval in the task menu."),
+          h(Switch, { id: "redmine-reply-auto-publish", "data-testid": "redmine-reply-auto-publish", "aria-describedby": "redmine-reply-mode-description", checked: selected.auto_publish === true, disabled: !connected || loading || saving || !selected.step_id, onCheckedChange: checked => change({ auto_publish: checked }) })),
+        h("p", { id: "redmine-reply-mode-description", role: selected.auto_publish ? "alert" : undefined, className: "text-sm text-muted-foreground" }, selected.auto_publish ? "After saving, new completed replies can publish public comments or private notes without human approval. Existing drafts are not sent. Turning this off stops new automatic submissions; a comment already being submitted cannot be recalled." : "Human approval required (default). Every comment needs an exact preview and explicit approval in the task menu."),
         h("p", { className: "text-sm text-muted-foreground" }, "Use a fixed read-only profile, disable native auto-start and automatic transitions, and leave this step unmapped from Redmine status write-back. The plugin owns the single draft request. Empty step disables drafting."),
         error ? h("p", { role: "alert" }, error) : null),
       h(CardFooter, null, h(Button, { disabled: !connected || loading || saving, onClick: save, "data-testid": "redmine-reply-save" }, "Save reply drafting")));

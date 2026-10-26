@@ -15,18 +15,35 @@ import (
 // Reuse the connector's poll loop; the agent never receives publishing credentials.
 func (p *redminePlugin) pollReplies(ctx context.Context, workspaceID string) error {
 	settings, err := p.replySettings(ctx, workspaceID)
-	if err != nil || !settings.AutoPublish || settings.StepID == "" {
+	if err != nil {
 		return err
 	}
+	workflows := map[string]bool{}
+	for _, entry := range settings.all() {
+		if entry.AutoPublish {
+			workflows[entry.WorkflowID] = true
+		}
+	}
+	var failures []error
+	for workflowID := range workflows {
+		if err := p.pollWorkflowReplies(ctx, workspaceID, workflowID, settings); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (p *redminePlugin) pollWorkflowReplies(ctx context.Context, workspaceID, workflowID string, settings replyConfiguration) error {
 	page := pluginsdk.Page{Limit: 100}
 	var failures []error
 	for n := 0; n < 20; n++ {
-		tasks, info, err := p.Host().Tasks().List(ctx, pluginsdk.TaskFilter{WorkspaceIDs: []string{workspaceID}, WorkflowIDs: []string{settings.WorkflowID}}, page)
+		tasks, info, err := p.Host().Tasks().List(ctx, pluginsdk.TaskFilter{WorkspaceIDs: []string{workspaceID}, WorkflowIDs: []string{workflowID}}, page)
 		if err != nil {
 			return err
 		}
 		for _, task := range tasks {
-			if task.WorkspaceID == workspaceID && task.WorkflowID == settings.WorkflowID && task.WorkflowStepID == settings.StepID {
+			entry, configured := settings.forTask(&task)
+			if task.WorkspaceID == workspaceID && task.WorkflowID == workflowID && configured && entry.AutoPublish {
 				if err := p.publishAutomaticReply(ctx, workspaceID, task.ID); err != nil {
 					failures = append(failures, fmt.Errorf("task %s: %w", task.ID, err))
 				}
@@ -46,9 +63,16 @@ func (p *redminePlugin) pollReplies(ctx context.Context, workspaceID string) err
 func (p *redminePlugin) publishAutomaticReply(ctx context.Context, workspaceID, taskID string) error {
 	p.commentMu.Lock()
 	defer p.commentMu.Unlock()
-	settings, err := p.replySettings(ctx, workspaceID)
-	if err != nil || !settings.AutoPublish || settings.PolicyID == "" || settings.AuthorizedBy == "" {
+	configuration, err := p.replySettings(ctx, workspaceID)
+	if err != nil {
 		return err
+	}
+	active := false
+	for _, entry := range configuration.all() {
+		active = active || entry.AutoPublish
+	}
+	if !active {
+		return nil
 	}
 	value, found, err := p.Host().GetState(ctx, "task", taskID, replyLatestKey)
 	if err != nil || !found {
@@ -76,7 +100,13 @@ func (p *redminePlugin) publishAutomaticReply(ctx context.Context, workspaceID, 
 	if request.PublicationState != "waiting" && request.PublicationState != "unverified" && request.PublicationState != "rejected" && request.PublicationState != "cancelled" {
 		return hold("The automatic publication state is invalid; inspect the native task.")
 	}
-	if request.PolicyID != settings.PolicyID {
+	var settings replySettings
+	for _, entry := range configuration.all() {
+		if entry.AutoPublish && entry.PolicyID == request.PolicyID && entry.AuthorizedBy != "" {
+			settings = entry
+		}
+	}
+	if settings.PolicyID == "" {
 		return hold("Publishing mode or configuration changed. Prepare a new draft or review this one manually.")
 	}
 	task, err := p.Host().Tasks().Get(ctx, taskID)
