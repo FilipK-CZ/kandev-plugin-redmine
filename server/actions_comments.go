@@ -25,6 +25,7 @@ type commentProposal struct {
 	IssueID      int    `json:"issue_id"`
 	Notes        string `json:"notes"`
 	PrivateNotes *bool  `json:"private_notes"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 type commentDraft struct {
@@ -44,8 +45,12 @@ type commentDraft struct {
 	State              string `json:"state"`
 	PreparedAt         string `json:"prepared_at"`
 	ApprovedAt         string `json:"approved_at,omitempty"`
+	CancelledAt        string `json:"cancelled_at,omitempty"`
 	ApprovedBy         string `json:"approved_by,omitempty"`
 	JournalID          int    `json:"journal_id,omitempty"`
+	PolicyID           string `json:"policy_id,omitempty"`
+	SourceRequestID    string `json:"source_request_id,omitempty"`
+	SourceMessageID    string `json:"source_message_id,omitempty"`
 }
 
 func (p *redminePlugin) commentContext(ctx context.Context, req *pluginsdk.PluginActionRequest) (*redmineclient.Client, *connection.Record, *issues.Issue, error) {
@@ -156,8 +161,7 @@ func (p *redminePlugin) handleCommentPrepare(ctx context.Context, req *pluginsdk
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, err
 	}
-	body.Notes = strings.TrimSpace(strings.ReplaceAll(body.Notes, "\r\n", "\n"))
-	if body.Notes == "" || !utf8.ValidString(body.Notes) || len(body.Notes) > maxCommentBytes || strings.ContainsRune(body.Notes, 0) || body.PrivateNotes == nil {
+	if !normalizeCommentProposal(&body.commentProposal) {
 		return classifiedErrorResponse(fmt.Errorf("redmine: provide a comment up to 32 KiB and explicitly select public or private visibility"))
 	}
 	p.commentMu.Lock()
@@ -184,18 +188,28 @@ func (p *redminePlugin) handleCommentPrepare(ctx context.Context, req *pluginsdk
 	if body.ExpectedContextHash == "" || body.ExpectedContextHash != commentContextHash(issue) {
 		return classifiedErrorResponse(fmt.Errorf("redmine: issue changed since loading; reload and review its current context"))
 	}
-	user, err := client.ValidateCredentials(ctx)
+	draft, err := p.prepareComment(ctx, client, conn, issue, &commentDraft{WorkspaceID: req.Context.WorkspaceID, TaskID: req.Context.TaskID, Notes: body.Notes, PrivateNotes: *body.PrivateNotes, ActorID: req.Context.ActorID})
 	if err != nil {
 		return classifiedErrorResponse(err)
 	}
+	return jsonResponse(draft)
+}
+
+func (p *redminePlugin) prepareComment(ctx context.Context, client *redmineclient.Client, conn *connection.Record, issue *issues.Issue, draft *commentDraft) (*commentDraft, error) {
+	user, err := client.ValidateCredentials(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if user.ID <= 0 {
-		return classifiedErrorResponse(fmt.Errorf("redmine: publishing identity is unavailable"))
+		return nil, fmt.Errorf("redmine: publishing identity is unavailable")
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	draft := &commentDraft{ID: hex.EncodeToString(nonce[:]), WorkspaceID: req.Context.WorkspaceID, TaskID: req.Context.TaskID, IssueID: issue.ID, IssueURL: issue.URL, Subject: issue.Subject, Notes: body.Notes, PrivateNotes: *body.PrivateNotes, ActorID: req.Context.ActorID, WriterID: user.ID, ConnectionRevision: conn.Revision, ContextHash: commentContextHash(issue), State: "prepared", PreparedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	draft.ID, draft.IssueID, draft.IssueURL, draft.Subject = hex.EncodeToString(nonce[:]), issue.ID, issue.URL, issue.Subject
+	draft.WriterID, draft.ConnectionRevision, draft.ContextHash = user.ID, conn.Revision, commentContextHash(issue)
+	draft.State, draft.PreparedAt = "prepared", time.Now().UTC().Format(time.RFC3339Nano)
 	for _, journal := range issue.Journals {
 		if journal.ID > draft.LastJournalID {
 			draft.LastJournalID = journal.ID
@@ -207,7 +221,7 @@ func (p *redminePlugin) handleCommentPrepare(ctx context.Context, req *pluginsdk
 	if err := p.Host().SetState(ctx, "task", draft.TaskID, commentCurrentKey, map[string]any{"id": draft.ID}); err != nil {
 		return nil, err
 	}
-	return jsonResponse(draft)
+	return draft, nil
 }
 
 func (p *redminePlugin) handleCommentPublish(ctx context.Context, req *pluginsdk.PluginActionRequest, approve bool) (*pluginsdk.PluginActionResponse, error) {
@@ -230,28 +244,48 @@ func (p *redminePlugin) handleCommentPublish(ctx context.Context, req *pluginsdk
 	if draft.WorkspaceID != req.Context.WorkspaceID || draft.IssueID != issue.ID || draft.IssueURL != issue.URL || draft.ConnectionRevision != conn.Revision {
 		return classifiedErrorResponse(fmt.Errorf("redmine: issue link or connection changed; this approval cannot be used"))
 	}
+	if approve && draft.State == "prepared" && (draft.ActorID != req.Context.ActorID || draft.PolicyID != "") {
+		return classifiedErrorResponse(fmt.Errorf("redmine: prepare a new human-review preview before approving this draft"))
+	}
+	result, err := p.publishComment(ctx, client, issue, draft, approve, req.Context.ActorID)
+	if err != nil {
+		return classifiedErrorResponse(err)
+	}
+	return jsonResponse(result)
+}
+
+// Both authorization modes use the same persisted attempt and single-append path.
+// Callers hold commentMu and verify their human approval or workspace policy.
+func (p *redminePlugin) publishComment(ctx context.Context, client *redmineclient.Client, issue *issues.Issue, draft *commentDraft, approve bool, approvedBy string) (*commentDraft, error) {
 	if draft.State == "published" || draft.State == "rejected" || draft.State == "cancelled" {
-		return jsonResponse(draft)
+		return draft, nil
 	}
 	if draft.State == "prepared" {
 		if !approve {
-			return jsonResponse(draft)
+			return draft, nil
 		}
 		current, err := p.currentComment(ctx, draft.TaskID)
 		if err != nil {
 			return nil, err
 		}
-		if current == nil || current.ID != draft.ID || draft.ActorID != req.Context.ActorID || draft.ContextHash != commentContextHash(issue) {
-			return classifiedErrorResponse(fmt.Errorf("redmine: draft, reviewer or issue changed; prepare a new preview before approving"))
+		if current == nil || current.ID != draft.ID || draft.ContextHash != commentContextHash(issue) {
+			return nil, fmt.Errorf("redmine: draft or issue changed; prepare a new preview before approving")
 		}
 		user, err := client.ValidateCredentials(ctx)
 		if err != nil {
-			return classifiedErrorResponse(err)
+			return nil, err
 		}
 		if user.ID != draft.WriterID || user.ID <= 0 {
-			return classifiedErrorResponse(fmt.Errorf("redmine: publishing identity changed"))
+			return nil, fmt.Errorf("redmine: publishing identity changed")
 		}
-		draft.State, draft.ApprovedBy, draft.ApprovedAt = "sending", req.Context.ActorID, time.Now().UTC().Format(time.RFC3339Nano)
+		latest, err := issues.New(client).GetIssue(ctx, draft.IssueID)
+		if err != nil {
+			return nil, err
+		}
+		if draft.ContextHash != commentContextHash(latest) {
+			return nil, fmt.Errorf("redmine: issue changed immediately before publication; review its current context")
+		}
+		draft.State, draft.ApprovedBy, draft.ApprovedAt = "sending", approvedBy, time.Now().UTC().Format(time.RFC3339Nano)
 		// Persist the attempt before touching Redmine. An uncertain state write
 		// or acknowledgement must never cause another append.
 		if err := p.saveComment(ctx, draft); err != nil {
@@ -263,11 +297,11 @@ func (p *redminePlugin) handleCommentPublish(ctx context.Context, req *pluginsdk
 				if err := p.saveComment(ctx, draft); err != nil {
 					return nil, err
 				}
-				return jsonResponse(draft)
+				return draft, nil
 			}
 		}
 	} else if !commentPending(draft) {
-		return classifiedErrorResponse(fmt.Errorf("redmine: invalid comment state"))
+		return nil, fmt.Errorf("redmine: invalid comment state")
 	}
 	latest, err := issues.New(client).GetIssue(ctx, draft.IssueID)
 	draft.State = "unverified"
@@ -285,7 +319,7 @@ func (p *redminePlugin) handleCommentPublish(ctx context.Context, req *pluginsdk
 	if err := p.saveComment(ctx, draft); err != nil {
 		return nil, err
 	}
-	return jsonResponse(draft)
+	return draft, nil
 }
 
 func (p *redminePlugin) handleCommentDiscard(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
@@ -307,7 +341,7 @@ func (p *redminePlugin) handleCommentDiscard(ctx context.Context, req *pluginsdk
 	if draft.WorkspaceID != req.Context.WorkspaceID || draft.ActorID != req.Context.ActorID || draft.State != "prepared" {
 		return classifiedErrorResponse(fmt.Errorf("redmine: only the reviewing user can edit an unsubmitted preview"))
 	}
-	draft.State = "cancelled"
+	draft.State, draft.CancelledAt = "cancelled", time.Now().UTC().Format(time.RFC3339Nano)
 	if err := p.saveComment(ctx, draft); err != nil {
 		return nil, err
 	}
@@ -343,7 +377,7 @@ func (p *redminePlugin) handleCommentGet(ctx context.Context, req *pluginsdk.Plu
 	return jsonResponse(map[string]any{
 		"issue": map[string]any{"id": issue.ID, "url": issue.URL, "subject": issue.Subject, "updated_on": issue.UpdatedOn},
 		"draft": draft, "proposal": proposal, "draft_warning": warning,
-		"can_approve": draft != nil && draft.ActorID == req.Context.ActorID && draft.State == "prepared",
+		"can_approve": draft != nil && draft.ActorID == req.Context.ActorID && draft.State == "prepared" && draft.PolicyID == "",
 		"current_id":  currentID, "context_hash": commentContextHash(issue), "draft_request": request,
 	})
 }
@@ -397,7 +431,7 @@ func parseCommentProposal(text string, issueID int) *commentProposal {
 	var proposal commentProposal
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&proposal) != nil || proposal.IssueID != issueID || proposal.PrivateNotes == nil || strings.TrimSpace(proposal.Notes) == "" || len(proposal.Notes) > maxCommentBytes {
+	if decoder.Decode(&proposal) != nil || proposal.IssueID != issueID || !normalizeCommentProposal(&proposal) {
 		return nil
 	}
 	var extra any
@@ -405,4 +439,9 @@ func parseCommentProposal(text string, issueID int) *commentProposal {
 		return nil
 	}
 	return &proposal
+}
+
+func normalizeCommentProposal(proposal *commentProposal) bool {
+	proposal.Notes = strings.TrimSpace(strings.ReplaceAll(proposal.Notes, "\r\n", "\n"))
+	return proposal.Notes != "" && utf8.ValidString(proposal.Notes) && len(proposal.Notes) <= maxCommentBytes && !strings.ContainsRune(proposal.Notes, 0) && proposal.PrivateNotes != nil
 }

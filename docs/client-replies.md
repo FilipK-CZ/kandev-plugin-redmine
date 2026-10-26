@@ -1,4 +1,4 @@
-# Review-gated client replies
+# Client replies with configurable publication
 
 Reply generation and publication are separate. Existing connections, API keys,
 selected projects, mappings and watchers are reused; instance/project/user names
@@ -6,8 +6,9 @@ and writing rules are never compiled into the plugin. The plugin ID is unchanged
 
 ## Configure
 
-1. Grant the plugin workspace-scoped message read/write access in addition to its
-   existing task/workflow access. No Redmine credential is copied to the agent.
+1. Grant workspace-scoped message read/write and session/interaction read access
+   in addition to existing task/workflow access. No Redmine credential is copied
+   to the agent, and the plugin never answers pending human interactions.
 2. Create a saved Kandev prompt for the client's language, tone and evidence rules.
 3. Add a communication step with a fixed read-only agent profile. Disable native
    auto-start and all automatic exit transitions: the plugin owns the initial
@@ -17,6 +18,12 @@ and writing rules are never compiled into the plugin. The plugin ID is unchanged
    configured communication step is held against inbound status-sync moves;
    title/description/priority synchronization and all other steps keep their rules.
 5. Route the desired task handoff to this step. Keep the connection enabled.
+
+**Publish replies automatically** is off by default, including upgrades and
+workspaces with existing settings. Off means an operator must approve each exact
+comment. Turning it on and saving authorizes the plugin to append completed
+replies without per-comment approval. The setting is independent of the empty-step
+drafting switch and the integration's overall enabled/paused switch.
 
 Entering the step sends one draft request with live issue details and public
 journals to the current task. Private journals are omitted. Issue text is data,
@@ -30,12 +37,12 @@ The drafting agent keeps evidence and validation limits in the task plan. Its
 final message contains only:
 
 ```redmine-comment
-{"issue_id":42,"private_notes":false,"notes":"The proposed client reply."}
+{"issue_id":42,"request_id":"the exact request ID supplied in the prompt","private_notes":false,"notes":"The proposed client reply."}
 ```
 
 The example ID is illustrative; every real draft must match its live task link.
 There is no approved flag. Missing/unsafe evidence should produce a Kandev blocker,
-not a publishable draft. Changing a writing prompt cannot approve a comment.
+not a publishable draft. Writing prompts do not control publication permissions.
 
 ## Approve and publish
 
@@ -46,8 +53,9 @@ visibility. **Review exact comment** stores an immutable preview for this operat
 task, issue, writer identity and issue-context fingerprint. It performs no Redmine
 write. Editing discards that preview; a replacement gets a new ID.
 
-Only **Approve and publish public comment/private note** submits the stored
-preview. The request contains its ID, not replacement text or issue fields.
+With automatic publication off, only **Approve and publish public comment/private
+note** submits the stored preview. The request contains its ID, not replacement
+text or issue fields.
 The backend rechecks the actor, link, selected project, connection revision,
 publishing identity and current issue context. It appends only `notes` and
 `private_notes`; status, assignment, title and billing stay unchanged.
@@ -64,14 +72,44 @@ plugin state. The native task and Redmine journal retain their corresponding
 history. Approval never marks the Kandev task done; the operator checks the scoped
 technical acceptance and moves the task when appropriate.
 
+## Automatic publication
+
+Enabling the switch creates a server-generated policy identity attributed to the
+authenticated operator. Only requests started under that exact active policy can
+publish automatically. Enabling it does not send an existing draft or preview.
+Disabling and re-enabling, or changing the workflow/step/prompt, invalidates old
+automatic requests. A comment already being submitted cannot be recalled.
+
+The existing connector poll loop checks completed responses, normally once per
+minute. It verifies the linked issue and connection are unchanged since dispatch,
+the task remains in the communication step, the expected session/profile is idle
+or complete, no other session is running, and no human interaction is pending.
+The latest final agent message must match the request ID, session, issue and
+timestamp, with a nonempty turn ID; incomplete or unrelated results cannot publish. Private
+notes require the explicit visibility field just like public comments.
+
+The plugin stores the exact response and its source request/message, then uses
+the same single-attempt publisher and journal readback as manual approval. Its
+receipt records `automatic-policy:<id>` rather than inventing human approval of
+that response. Restarts and polling never replay an attempted append. Failed or
+stale evidence, configuration changes and manual previews hold the request for
+review; the task menu shows the reason. Pending questions and running agents wait.
+Manual publication remains available after preparing a new human-review preview.
+
+Automatic publication does not change issue fields or complete/move the task.
+The agent still drafts without a Redmine credential; the plugin alone publishes.
+
 ## Boundaries
 
-- Automatic publication is absent in this version. A later policy must reuse the
-  verified publisher and explicitly define its scope; agent auto-approval is not a
-  substitute for this review.
+- Agent permission auto-approval is unrelated to this switch. Drafting stays
+  read-only in both modes; only the plugin's authenticated workspace setting can
+  authorize automatic publication.
 - Draft discovery is bounded to 1,000 task messages. A malformed cursor, missing
   message grant, oversized live context (128 KiB) or absent valid final draft is
   shown for manual attention rather than silently using an older proposal.
+- Automatic discovery scans at most 2,000 workflow tasks and 100 sessions per
+  task. Missing read grants, incomplete session history or uncertain completion
+  cannot authorize publication.
 - The workflow SDK exposes profile IDs and entry actions, not profile permission
   modes or exit transitions. The operator must verify read-only mode and the
   manual exit in Kandev; the settings handler rejects native auto-start and a

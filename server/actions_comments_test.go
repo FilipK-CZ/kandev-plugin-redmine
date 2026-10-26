@@ -15,14 +15,15 @@ import (
 )
 
 type commentFixture struct {
-	mu              sync.Mutex
-	puts            int
-	status          int
-	appendComment   bool
-	wrongVisibility bool
-	updated         string
-	journals        []map[string]any
-	payload         map[string]any
+	mu                  sync.Mutex
+	puts                int
+	status              int
+	appendComment       bool
+	wrongVisibility     bool
+	changeContextOnAuth bool
+	updated             string
+	journals            []map[string]any
+	payload             map[string]any
 }
 
 func (f *commentFixture) snapshot() (int, map[string]any) {
@@ -40,6 +41,10 @@ func newCommentFixture(t *testing.T) (*redminePlugin, *fakeHost, *commentFixture
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/users/current.json":
+			if f.changeContextOnAuth {
+				f.updated = "2026-10-26T12:00:00Z"
+				f.changeContextOnAuth = false
+			}
 			_, _ = w.Write([]byte(`{"user":{"id":7,"login":"reviewer"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/issues/42.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{"issue": map[string]any{"id": 42, "subject": "Example issue", "project": map[string]int{"id": 1}, "updated_on": f.updated, "journals": f.journals}})
@@ -243,8 +248,21 @@ func TestCommentDoesNotPublishWhenAttemptCannotBePersisted(t *testing.T) {
 	p.UnimplementedPlugin.SetHost(failingCommentStateHost{h})
 	body, err := json.Marshal(map[string]any{"draft_id": draft["id"]})
 	require.NoError(t, err)
-	_, err = p.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{ActionKey: "comments.approve", Context: pluginsdk.VerifiedActionContext{WorkspaceID: "ws-1", TaskID: "task-1", ActorID: "human"}, Body: body})
-	require.ErrorContains(t, err, "state persistence unavailable")
+	response, err := p.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{ActionKey: "comments.approve", Context: pluginsdk.VerifiedActionContext{WorkspaceID: "ws-1", TaskID: "task-1", ActorID: "human"}, Body: body})
+	require.NoError(t, err)
+	require.Contains(t, string(response.Body), "state persistence unavailable")
+	puts, _ := f.snapshot()
+	require.Zero(t, puts)
+}
+
+func TestCommentRechecksContextImmediatelyBeforeAppending(t *testing.T) {
+	p, _, f := newCommentFixture(t)
+	draft := prepareComment(t, p, false)
+	f.mu.Lock()
+	f.changeContextOnAuth = true
+	f.mu.Unlock()
+	result := commentAction(t, p, "comments.approve", "human", map[string]any{"draft_id": draft["id"]})
+	require.Contains(t, result["error"], "immediately before publication")
 	puts, _ := f.snapshot()
 	require.Zero(t, puts)
 }

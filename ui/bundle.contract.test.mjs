@@ -6,7 +6,7 @@ const bundle = await readFile(new URL("./bundle.js", import.meta.url), "utf8");
 
 async function loadBundleTestHooks() {
   globalThis.window = { registerKandevPlugin() {} };
-  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke, makeRedmineCommentAction };`;
+  const source = `${bundle}\nglobalThis.__redmineBundleTestHooks = { createSyncSaveController, syncControllerForWorkspace, workspaceActionInvoke, taskActionInvoke, makeRedmineCommentAction, makeSettingsComponent };`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   return globalThis.__redmineBundleTestHooks;
 }
@@ -104,6 +104,61 @@ test("editing a prepared comment invalidates its approval before accepting edits
   assert.ok(dialog.find("redmine-comment-notes"));
   assert.equal(dialog.find("redmine-comment-approve"), undefined);
   assert.deepEqual(calls, ["comments.get", "comments.get", "comments.discard"]);
+});
+
+async function replySettingsForm(autoPublish) {
+  const { makeSettingsComponent } = await loadBundleTestHooks();
+  const calls = [];
+  let cursor = 0;
+  let section = false;
+  let hooks = [{ state: "connected" }, false];
+  const effects = [];
+  const host = {
+    jsx: (type, props, ...children) => ({ type, props: props || {}, children }),
+    ui: new Proxy({}, { get: (_, key) => key }),
+    React: {
+      useState(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = initial; return [hooks[index], value => { hooks[index] = value; }]; },
+      useRef(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = { current: initial }; return hooks[index]; },
+      useCallback(fn) { return fn; },
+      useEffect(fn) { if (!section) return; const index = cursor++; if (!(index in hooks)) { hooks[index] = true; effects.push(fn); } },
+    },
+    toast: { success() {}, error(message) { throw new Error(message); } },
+    api: { async invokeAction(key, context) {
+      calls.push({ key, context });
+      if (key === "replies.settings.get") return { workflow_id: "workflow-1", step_id: "reply-step", prompt_name: "client-reply", ...(autoPublish === undefined ? {} : { auto_publish: autoPublish }) };
+      if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }] };
+      if (key === "replies.settings.save") return context.body;
+      throw new Error(`unexpected action ${key}`);
+    } },
+  };
+  const all = node => !node || typeof node !== "object" ? [] : [node, ...node.children.flat(Infinity).flatMap(all)];
+  const page = makeSettingsComponent(host)({ workspaceId: "workspace-1" });
+  const component = all(page).find(node => node.type?.name === "ReplyDraftingSection");
+  assert.ok(component);
+  section = true; hooks = [];
+  const render = () => { cursor = 0; return component.type(component.props); };
+  render(); effects.forEach(effect => effect());
+  await new Promise(resolve => setImmediate(resolve));
+  return { calls, find: id => all(render()).find(node => node.props["data-testid"] === id) };
+}
+
+test("reply publication defaults to human approval and saves either mode explicitly", async () => {
+  const form = await replySettingsForm(undefined);
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, false);
+  form.find("redmine-reply-auto-publish").props.onCheckedChange(true);
+  assert.equal(form.calls.some(call => call.key === "replies.settings.save"), false);
+  await form.find("redmine-reply-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.auto_publish, true);
+  assert.equal(form.calls.at(-1).context.workspaceId, "workspace-1");
+  assert.equal("taskId" in form.calls.at(-1).context, false);
+  form.find("redmine-reply-auto-publish").props.onCheckedChange(false);
+  await form.find("redmine-reply-save").props.onClick();
+  assert.equal(form.calls.at(-1).context.body.auto_publish, false);
+});
+
+test("reply publication loads the saved automatic mode without silently resetting it", async () => {
+  const form = await replySettingsForm(true);
+  assert.equal(form.find("redmine-reply-auto-publish").props.checked, true);
 });
 
 test("integration registration supplies a branded icon and workspace enable action", () => {

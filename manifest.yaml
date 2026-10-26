@@ -43,6 +43,8 @@ runtime:
 #              step id rather than a free-text string (spec explicitly scopes
 #              one connection to one workflow — "Out of scope: mapping
 #              Redmine statuses across more than one Kandev workflow").
+#              messages: drafting and preview discovery. sessions/interactions:
+#              read-only completion checks before opt-in automatic publication.
 #   api_write: ["tasks"] - creating watcher tasks and updating already-linked
 #              tasks during sync/write-back. Task linking itself is
 #              plugin-owned state (Tasks().Update has no metadata field to
@@ -60,7 +62,7 @@ runtime:
 capabilities:
   state: true
   secrets: true
-  api_read: ["tasks", "workflows", "messages"]
+  api_read: ["tasks", "workflows", "messages", "sessions", "interactions"]
   api_write: ["tasks", "messages"]
   events: ["task.moved", "task.deleted", "workspace.deleted"]
 

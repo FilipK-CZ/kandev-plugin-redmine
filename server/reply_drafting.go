@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -24,17 +25,27 @@ const replyLatestKey = "reply.latest"
 var replyDraftInstructions string
 
 type replySettings struct {
-	WorkflowID string `json:"workflow_id"`
-	StepID     string `json:"step_id"`
-	PromptName string `json:"prompt_name"`
+	WorkflowID   string `json:"workflow_id"`
+	StepID       string `json:"step_id"`
+	PromptName   string `json:"prompt_name"`
+	AutoPublish  bool   `json:"auto_publish"`
+	PolicyID     string `json:"policy_id,omitempty"`
+	AuthorizedBy string `json:"authorized_by,omitempty"`
 }
 
 type replyRequest struct {
-	ID          string `json:"id"`
-	IssueID     int    `json:"issue_id"`
-	State       string `json:"state"`
-	RequestedAt string `json:"requested_at"`
-	SessionID   string `json:"session_id,omitempty"`
+	ID                 string `json:"id"`
+	IssueID            int    `json:"issue_id"`
+	State              string `json:"state"`
+	RequestedAt        string `json:"requested_at"`
+	SessionID          string `json:"session_id,omitempty"`
+	ProfileID          string `json:"profile_id,omitempty"`
+	ContextHash        string `json:"context_hash,omitempty"`
+	ConnectionRevision string `json:"connection_revision,omitempty"`
+	PolicyID           string `json:"policy_id,omitempty"`
+	CommentID          string `json:"comment_id,omitempty"`
+	PublicationState   string `json:"publication_state,omitempty"`
+	PublicationError   string `json:"publication_error,omitempty"`
 }
 
 func (p *redminePlugin) replySettings(ctx context.Context, workspaceID string) (replySettings, error) {
@@ -63,12 +74,32 @@ func (p *redminePlugin) handleReplySettings(ctx context.Context, req *pluginsdk.
 	if err != nil {
 		return nil, err
 	}
+	// Policy identities come only from the authenticated settings action.
+	settings.PolicyID, settings.AuthorizedBy = "", ""
 	if settings.StepID != "" {
 		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`).MatchString(settings.PromptName) {
 			return classifiedErrorResponse(fmt.Errorf("redmine: choose a saved prompt name using letters, numbers, dots, underscores or hyphens"))
 		}
-		if err := p.validateReplyStep(ctx, req.Context.WorkspaceID, settings); err != nil {
+		if _, err := p.validateReplyStep(ctx, req.Context.WorkspaceID, settings); err != nil {
 			return classifiedErrorResponse(err)
+		}
+	}
+	if settings.AutoPublish {
+		if settings.StepID == "" || req.Context.ActorID == "" {
+			return classifiedErrorResponse(fmt.Errorf("redmine: automatic publishing requires an authenticated operator and a configured communication step"))
+		}
+		current, err := p.replySettings(ctx, req.Context.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		if current.AutoPublish && current.PolicyID != "" && current.AuthorizedBy != "" && current.WorkflowID == settings.WorkflowID && current.StepID == settings.StepID && current.PromptName == settings.PromptName {
+			settings.PolicyID, settings.AuthorizedBy = current.PolicyID, current.AuthorizedBy
+		} else {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return nil, err
+			}
+			settings.PolicyID, settings.AuthorizedBy = hex.EncodeToString(nonce[:]), req.Context.ActorID
 		}
 	}
 	encoded, _ := json.Marshal(settings)
@@ -80,19 +111,19 @@ func (p *redminePlugin) handleReplySettings(ctx context.Context, req *pluginsdk.
 	return jsonResponse(settings)
 }
 
-func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID string, settings replySettings) error {
+func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID string, settings replySettings) (string, error) {
 	mapping, found, err := p.fieldmappingSvc.Get(ctx, workspaceID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if found && mapping.WorkflowID == settings.WorkflowID {
 		if _, mapped := mapping.StatusForWorkflowStep(settings.StepID); mapped {
-			return fmt.Errorf("redmine: do not map the human-review drafting step to an automatic Redmine status")
+			return "", fmt.Errorf("redmine: do not map the communication step to an automatic Redmine status")
 		}
 	}
 	workflows, err := listWorkspaceWorkflows(ctx, p.Host().Workflows(), workspaceID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, workflow := range workflows {
 		if workflow.ID != settings.WorkflowID {
@@ -100,24 +131,24 @@ func (p *redminePlugin) validateReplyStep(ctx context.Context, workspaceID strin
 		}
 		steps, err := p.Host().Workflows().ListSteps(ctx, workflow.ID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		for _, step := range steps {
 			if step.ID != settings.StepID {
 				continue
 			}
 			if step.AgentProfileID == "" {
-				return fmt.Errorf("redmine: the drafting step needs a fixed read-only agent profile")
+				return "", fmt.Errorf("redmine: the drafting step needs a fixed read-only agent profile")
 			}
 			for _, action := range step.OnEnterActionTypes {
 				if action == "auto_start_agent" {
-					return fmt.Errorf("redmine: disable native auto-start on the drafting step; the plugin sends one live issue context")
+					return "", fmt.Errorf("redmine: disable native auto-start on the drafting step; the plugin sends one live issue context")
 				}
 			}
-			return nil
+			return step.AgentProfileID, nil
 		}
 	}
-	return fmt.Errorf("redmine: drafting step is unavailable in this workspace")
+	return "", fmt.Errorf("redmine: drafting step is unavailable in this workspace")
 }
 
 func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, requestID string) (*replyRequest, error) {
@@ -130,7 +161,8 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 	if settings.StepID == "" || strings.TrimSpace(requestID) == "" || len(requestID) > 200 {
 		return nil, fmt.Errorf("redmine: configure a communication step before requesting a draft")
 	}
-	if err := p.validateReplyStep(ctx, workspaceID, settings); err != nil {
+	profileID, err := p.validateReplyStep(ctx, workspaceID, settings)
+	if err != nil {
 		return nil, err
 	}
 	task, err := p.Host().Tasks().Get(ctx, taskID)
@@ -143,7 +175,7 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 	if task.QueuedAt != nil || task.QueuedForStepID != "" {
 		return nil, fmt.Errorf("redmine: this task is awaiting workflow admission; request its draft after admission")
 	}
-	_, _, issue, err := p.linkedCommentContext(ctx, workspaceID, taskID)
+	_, conn, issue, err := p.linkedCommentContext(ctx, workspaceID, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,17 +240,11 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 		return nil, fmt.Errorf("redmine: issue context exceeds 128 KiB; prepare focused input manually")
 	}
 	prompt := fmt.Sprintf(replyDraftInstructions, settings.PromptName, issue.ID, hex.EncodeToString(hash[:]), evidence)
-	result := &replyRequest{ID: requestID, IssueID: issue.ID, State: "sending", RequestedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	save := func() error {
-		raw, _ := json.Marshal(result)
-		var value map[string]any
-		_ = json.Unmarshal(raw, &value)
-		if err := p.Host().SetState(ctx, "task", taskID, key, value); err != nil {
-			return err
-		}
-		return p.Host().SetState(ctx, "task", taskID, replyLatestKey, value)
+	result := &replyRequest{ID: requestID, IssueID: issue.ID, State: "sending", RequestedAt: time.Now().UTC().Format(time.RFC3339Nano), ProfileID: profileID, ContextHash: commentContextHash(issue), ConnectionRevision: conn.Revision}
+	if settings.AutoPublish && settings.PolicyID != "" && settings.AuthorizedBy != "" {
+		result.PolicyID, result.PublicationState = settings.PolicyID, "waiting"
 	}
-	if err := save(); err != nil {
+	if err := p.saveReplyRequest(ctx, taskID, result); err != nil {
 		return nil, err
 	}
 	dispatch, sendErr := p.Host().Messages().Send(ctx, taskID, "", prompt)
@@ -230,10 +256,26 @@ func (p *redminePlugin) requestReply(ctx context.Context, workspaceID, taskID, r
 		result.State = "sent"
 		result.SessionID = dispatch.SessionID
 	}
-	if err := save(); err != nil {
+	if err := p.saveReplyRequest(ctx, taskID, result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (p *redminePlugin) saveReplyRequest(ctx context.Context, taskID string, result *replyRequest) error {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	hash := sha256.Sum256([]byte(result.ID))
+	if err := p.Host().SetState(ctx, "task", taskID, "reply.request."+hex.EncodeToString(hash[:]), value); err != nil {
+		return err
+	}
+	return p.Host().SetState(ctx, "task", taskID, replyLatestKey, value)
 }
 
 func (p *redminePlugin) handleReplyRequest(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {

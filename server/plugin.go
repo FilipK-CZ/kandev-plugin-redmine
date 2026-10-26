@@ -31,8 +31,8 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// defaultSyncPollInterval is the production inbound-sync cadence. Outbound
-// status changes are sent only by the task.moved event path or the manual
+// defaultSyncPollInterval is the inbound-sync and opt-in reply-publication cadence.
+// Outbound status changes are sent only by the task.moved event path or the manual
 // status action. The environment override exists for deterministic packaged
 // integration tests; invalid or sub-second values retain the safe default.
 const defaultSyncPollInterval = 60 * time.Second
@@ -194,6 +194,9 @@ func (p *redminePlugin) pollWorkspace(ctx context.Context, workspaceID string) e
 		return nil // not connected (or credentials rejected) - nothing to poll
 	}
 	issuesSvc := issues.New(client)
+	if err := p.pollReplies(ctx, workspaceID); err != nil {
+		log.Printf("redmine: reply publication for workspace %s: %v", workspaceID, err)
+	}
 
 	if err := p.pollSync(ctx, workspaceID, issuesSvc); err != nil {
 		return err
@@ -279,7 +282,7 @@ func applyWatchPriorityMapping(w watch.Watch, mapping fieldmapping.Mapping) watc
 // OnEvent handles task.moved for near-real-time outbound write-back (see
 // manifest.yaml's capabilities.events doc comment for why this plugin
 // declares an events capability at all). Every other event type is ignored.
-// Polling is inbound only: a missed task.moved is not reconstructed by a
+// Status polling is inbound only: a missed task.moved is not reconstructed by a
 // later poll and can instead be corrected with another move or the manual
 // "Set Redmine status" action.
 func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {

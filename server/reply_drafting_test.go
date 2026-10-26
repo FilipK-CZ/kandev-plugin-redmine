@@ -97,7 +97,7 @@ func TestReplyEventSendsLivePublicContextOnceWithoutPublishing(t *testing.T) {
 	require.Contains(t, prompt, "Latest public decision")
 	require.NotContains(t, prompt, "Private planning note")
 	require.Contains(t, prompt, "```redmine-comment\n{\"issue_id\":42")
-	require.Contains(t, prompt, "Publication requires human approval")
+	require.Contains(t, prompt, "Publication is controlled by the plugin's workspace setting")
 	require.Contains(t, prompt, "do not publish, change issue fields, approve anything")
 	f.mu.Lock()
 	require.Zero(t, f.puts)
