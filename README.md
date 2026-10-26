@@ -241,20 +241,45 @@ marks the plugin active. Sideloaded plugins register **disabled/unverified**;
 enable it in **Settings > Plugins** (the `plugins` feature flag must be on).
 Reinstalling the same version returns 409 — bump `version` in `manifest.yaml`.
 
+### Manual updates by URL
+
+After the first release from this fork, paste this same URL into **Settings >
+Plugins > Install plugin > URL** for each manual update:
+
+```text
+https://github.com/FilipK-CZ/kandev-plugin-redmine/releases/latest/download/kandev-plugin-redmine.tar.gz
+```
+
+GitHub resolves it to the latest published release. It does not point at CI
+artifacts or unreleased changes on `main`. Each new release has a new manifest
+version; installing the already installed version still returns 409.
+
+The package keeps the `kandev-plugin-redmine` ID so it updates the existing
+installation and retains its configuration, connections, and task links. No
+GitHub credentials, marketplace source, or auto-update setting is needed.
+Keep marketplace auto-update disabled for this fork and use this URL rather
+than the marketplace's **Update** button, which resolves the original upstream
+plugin under the same ID.
+
 ## Publish a release
 
 Pull requests run `.github/workflows/ci.yml` (tidy, format, vet, and test) and
-`.github/workflows/build.yml` (host build plus a five-platform package). Push a
-tag that matches the manifest version to run `.github/workflows/release.yml`:
-it repeats verification, cross-compiles all platforms, packs the tarball, and
-creates a GitHub Release with the two assets the kandev
+`.github/workflows/build.yml` (host build plus a five-platform package). After
+merging, run **Actions > release > Run workflow** on `main` with the desired
+version bump. This commits the release version, tags it, then builds and
+publishes it. Set `dry_run` to preview the next version without publishing.
+Alternatively, push a tag that matches the manifest version. The release
+workflow repeats verification, cross-compiles all platforms, packs the tarball,
+and creates a GitHub Release with these assets for direct installation and the
 [marketplace](https://github.com/kdlbs/kandev/blob/main/docs/public/plugins-marketplace.md)
-install pipeline expects:
+install pipeline:
 
 - `<id>-<version>.tar.gz` — the plugin package (with its own internal
-  `checksums.txt` verified on install), and
-- `checksums.txt` — the package's internal file checksums, extracted from the
-  tarball for inspection and marketplace tooling.
+  `checksums.txt` verified on install).
+- `<id>.tar.gz` — a byte-identical copy with a stable asset name for the manual
+  update URL above.
+- `checksums.txt` — SHA-256 checksums of both downloadable archives. These are
+  separate from the file checksums inside each archive.
 
 ```sh
 # bump VERSION in Makefile + version in manifest.yaml first, then:
