@@ -115,6 +115,24 @@ func New(client *redmineclient.Client) *Service {
 	return &Service{client: client}
 }
 
+func (s *Service) TokenUserID(ctx context.Context) (int, error) {
+	user, err := s.client.ValidateCredentials(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if user.ID <= 0 {
+		return 0, fmt.Errorf("redmine: token owner is unavailable")
+	}
+	return user.ID, nil
+}
+
+// SetStatusOnce leaves uncertain results for read-only reconciliation.
+func (s *Service) SetStatusOnce(ctx context.Context, id, statusID int) error {
+	return s.client.PutJSONOnce(ctx, fmt.Sprintf("/issues/%d.json", id), map[string]any{
+		"issue": map[string]any{"status_id": statusID},
+	}, nil)
+}
+
 // GetIssue fetches full issue detail (journals/attachments/relations
 // included) for read-only display.
 func (s *Service) GetIssue(ctx context.Context, id int) (*Issue, error) {

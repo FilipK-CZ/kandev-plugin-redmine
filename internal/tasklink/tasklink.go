@@ -29,6 +29,8 @@ type Link struct {
 	// (spec "Bidirectional sync"). Title/description are inbound-only — no
 	// outbound echo is recorded for them.
 	LastPushedStatusID *int
+	ObservedStatusID   int
+	ObservedTrackerID  int
 }
 
 const (
@@ -264,6 +266,25 @@ func (s *Service) ConsumeStatusEcho(ctx context.Context, taskID string) error {
 	return s.save(ctx, taskID, *link)
 }
 
+// ObserveStatus remembers external transitions without replaying an unchanged
+// routed status over the task's internal workflow progress.
+func (s *Service) ObserveStatus(ctx context.Context, taskID string, statusID, trackerID int, consumeEcho bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	link, found, err := s.getLocked(ctx, taskID)
+	if err != nil || !found {
+		return err
+	}
+	if link.ObservedStatusID == statusID && link.ObservedTrackerID == trackerID && !consumeEcho {
+		return nil
+	}
+	link.ObservedStatusID, link.ObservedTrackerID = statusID, trackerID
+	if consumeEcho {
+		link.LastPushedStatusID = nil
+	}
+	return s.save(ctx, taskID, *link)
+}
+
 func (s *Service) save(ctx context.Context, taskID string, link Link) error {
 	if err := s.host.SetState(ctx, taskScope, taskID, linkKey, link.toMap()); err != nil {
 		return fmt.Errorf("tasklink: saving link: %w", err)
@@ -333,9 +354,11 @@ func (s *Service) saveIndex(ctx context.Context, workspaceID string, index map[s
 
 func (l Link) toMap() map[string]any {
 	m := map[string]any{
-		"issue_id":     l.IssueID,
-		"issue_url":    l.IssueURL,
-		"workspace_id": l.WorkspaceID,
+		"issue_id":            l.IssueID,
+		"issue_url":           l.IssueURL,
+		"workspace_id":        l.WorkspaceID,
+		"observed_status_id":  l.ObservedStatusID,
+		"observed_tracker_id": l.ObservedTrackerID,
 	}
 	if l.LastPushedStatusID != nil {
 		m["last_pushed_status_id"] = *l.LastPushedStatusID
@@ -357,6 +380,12 @@ func linkFromMap(m map[string]any) Link {
 	if v, ok := m["last_pushed_status_id"].(float64); ok {
 		statusID := int(v)
 		link.LastPushedStatusID = &statusID
+	}
+	if v, ok := m["observed_status_id"].(float64); ok {
+		link.ObservedStatusID = int(v)
+	}
+	if v, ok := m["observed_tracker_id"].(float64); ok {
+		link.ObservedTrackerID = int(v)
 	}
 	// Legacy last_pushed_title / last_pushed_description_hash entries are
 	// Legacy applied_tracker_label / last_pushed_title /

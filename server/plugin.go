@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -239,6 +240,7 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, w := range watches {
 		if mappingFound && needsWatchBackfill(w) {
 			w = applyWatchMapping(w, mapping)
@@ -250,12 +252,28 @@ func (p *redminePlugin) pollWatches(ctx context.Context, workspaceID string, iss
 			// Resolve all new-import placement from current settings without migrating existing tasks.
 			w = applyWatchMapping(w, mapping)
 			w.TrackerRoutes = mapping.TrackerRoutes
+			w.EntrySteps = map[string][]pluginsdk.WorkflowStep{}
+			w.UnavailableWorkflows = map[string]error{}
+			workflowIDs := map[string]bool{mapping.WorkflowID: true}
+			for _, route := range mapping.TrackerRoutes {
+				workflowIDs[route.WorkflowID] = true
+			}
+			if w.Enabled {
+				for id := range workflowIDs {
+					steps, err := p.Host().Workflows().ListSteps(ctx, id)
+					if err != nil {
+						w.UnavailableWorkflows[id] = err
+						continue
+					}
+					w.EntrySteps[id] = steps
+				}
+			}
 		}
 		if err := p.watchSvc.Poll(ctx, w, issuesSvc); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func needsWatchBackfill(w watch.Watch) bool {

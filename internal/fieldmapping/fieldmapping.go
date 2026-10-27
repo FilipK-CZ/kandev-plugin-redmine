@@ -8,6 +8,7 @@ package fieldmapping
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -49,9 +50,51 @@ type Mapping struct {
 
 // TrackerRoute changes placement only for newly imported watcher tasks.
 type TrackerRoute struct {
-	RedmineTrackerID int    `json:"redmine_tracker_id"`
-	WorkflowID       string `json:"workflow_id"`
-	WorkflowStepID   string `json:"workflow_step_id"`
+	RedmineTrackerID int                    `json:"redmine_tracker_id"`
+	WorkflowID       string                 `json:"workflow_id"`
+	WorkflowStepID   string                 `json:"workflow_step_id"`
+	Statuses         []StatusMapping        `json:"statuses,omitempty"`
+	AutomaticIntake  *AutomaticIntakePolicy `json:"automatic_intake,omitempty"`
+}
+
+// AutomaticIntakePolicy permits one status-only claim, independently of write-back.
+type AutomaticIntakePolicy struct {
+	FromStatusID    int `json:"from_status_id"`
+	WorkingStatusID int `json:"working_status_id"`
+}
+
+func (r TrackerRoute) IntakeEntry(steps []pluginsdk.WorkflowStep) (pluginsdk.WorkflowStep, error) {
+	if r.AutomaticIntake == nil || r.AutomaticIntake.FromStatusID <= 0 || r.AutomaticIntake.WorkingStatusID <= 0 || r.AutomaticIntake.FromStatusID == r.AutomaticIntake.WorkingStatusID {
+		return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: automatic intake needs distinct source and working statuses")
+	}
+	for _, item := range r.Statuses {
+		if (item.RedmineStatusID == r.AutomaticIntake.FromStatusID || item.RedmineStatusID == r.AutomaticIntake.WorkingStatusID) && item.WorkflowStepID != "" && item.WorkflowStepID != r.WorkflowStepID {
+			return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: intake source and working statuses must stay unmapped or map to the selected entry step")
+		}
+	}
+	for _, step := range steps {
+		if step.ID == r.WorkflowStepID && step.AgentProfileID != "" {
+			for _, action := range step.OnEnterActionTypes {
+				if action == "auto_start_agent" {
+					return step, nil
+				}
+			}
+		}
+	}
+	return pluginsdk.WorkflowStep{}, fmt.Errorf("redmine: automatic intake requires an entry step with a fixed profile and native auto-start enabled")
+}
+
+// StatusesFor keeps tracker overrides isolated from the default workflow map.
+func (m Mapping) StatusesFor(trackerID int, workflowID string) []StatusMapping {
+	for _, route := range m.TrackerRoutes {
+		if route.RedmineTrackerID == trackerID && route.WorkflowID == workflowID {
+			return route.Statuses
+		}
+	}
+	if workflowID == m.WorkflowID {
+		return m.Statuses
+	}
+	return nil
 }
 
 // WorkflowStepForStatus resolves the inbound direction: a Redmine status ID
@@ -160,7 +203,10 @@ func DeriveCustomFieldsFromIssues(issuesFields [][]CustomField) []CustomField {
 func (m Mapping) toMap() map[string]any {
 	routes := make([]any, len(m.TrackerRoutes))
 	for i, route := range m.TrackerRoutes {
-		routes[i] = map[string]any{"redmine_tracker_id": route.RedmineTrackerID, "workflow_id": route.WorkflowID, "workflow_step_id": route.WorkflowStepID}
+		encoded, _ := json.Marshal(route)
+		var value map[string]any
+		_ = json.Unmarshal(encoded, &value)
+		routes[i] = value
 	}
 	statuses := make([]any, len(m.Statuses))
 	for i, s := range m.Statuses {
@@ -191,7 +237,10 @@ func mappingFromMap(m map[string]any) Mapping {
 	out := Mapping{WorkflowID: asString(m["workflow_id"])}
 	for _, raw := range asSlice(m["tracker_routes"]) {
 		if row, ok := raw.(map[string]any); ok {
-			out.TrackerRoutes = append(out.TrackerRoutes, TrackerRoute{RedmineTrackerID: asInt(row["redmine_tracker_id"]), WorkflowID: asString(row["workflow_id"]), WorkflowStepID: asString(row["workflow_step_id"])})
+			encoded, _ := json.Marshal(row)
+			var route TrackerRoute
+			_ = json.Unmarshal(encoded, &route)
+			out.TrackerRoutes = append(out.TrackerRoutes, route)
 		}
 	}
 	for _, raw := range asSlice(m["statuses"]) {

@@ -194,10 +194,13 @@ type inboundPlan struct {
 	updateChanged     bool
 	workflowStepID    string
 	consumeStatusEcho bool
+	statusID          int
+	trackerID         int
 }
 
 func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, issue issues.Issue, mapping fieldmapping.Mapping, opts Options) inboundPlan {
 	plan := inboundPlan{update: pluginsdk.UpdateTaskInput{ID: taskID}}
+	plan.statusID, plan.trackerID = issue.StatusID, issue.TrackerID
 	plan.consumeStatusEcho = link.LastPushedStatusID != nil
 	statusEcho := link.LastPushedStatusID != nil && *link.LastPushedStatusID == issue.StatusID
 	// Reconcile a non-echo mapped Redmine status only when the task is not
@@ -210,9 +213,14 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 			humanGate = true
 		}
 	}
-	// Routed workflows own their transitions; default status mapping must not move them back.
-	sameWorkflow := task.WorkflowID == mapping.WorkflowID
-	if stepID, ok := mapping.WorkflowStepForStatus(issue.StatusID); ok && sameWorkflow && !statusEcho && !humanGate && task.WorkflowStepID != stepID {
+	selected := fieldmapping.Mapping{Statuses: mapping.StatusesFor(issue.TrackerID, task.WorkflowID)}
+	statusChanged := true
+	for _, route := range mapping.TrackerRoutes {
+		if route.RedmineTrackerID == issue.TrackerID && route.WorkflowID == task.WorkflowID {
+			statusChanged = link.ObservedStatusID != issue.StatusID || link.ObservedTrackerID != issue.TrackerID
+		}
+	}
+	if stepID, ok := selected.WorkflowStepForStatus(issue.StatusID); ok && statusChanged && !statusEcho && !humanGate && task.WorkflowStepID != stepID {
 		plan.workflowStepID = stepID
 	}
 	if opts.SyncTitleDescription {
@@ -226,10 +234,7 @@ func buildInboundPlan(taskID string, task pluginsdk.Task, link tasklink.Link, is
 }
 
 func (s *Service) finishInbound(ctx context.Context, taskID string, plan inboundPlan) error {
-	if plan.consumeStatusEcho {
-		return s.tasklink.ConsumeStatusEcho(ctx, taskID)
-	}
-	return nil
+	return s.tasklink.ObserveStatus(ctx, taskID, plan.statusID, plan.trackerID, plan.consumeStatusEcho)
 }
 
 func applyTitleAndDescriptionInbound(update *pluginsdk.UpdateTaskInput, issue issues.Issue, task pluginsdk.Task) bool {
@@ -255,11 +260,35 @@ func (s *Service) PushWriteback(ctx context.Context, taskID, toWorkflowStepID st
 	if !opts.AutoStatusWriteback {
 		return nil
 	}
-	statusID, ok := mapping.StatusForWorkflowStep(toWorkflowStepID)
-	if !ok {
+	task, err := s.host.Tasks().Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil || task.WorkflowStepID != toWorkflowStepID {
 		return nil
 	}
-	return s.forceWriteback(ctx, taskID, statusID, issuesSvc)
+	link, found, err := s.tasklink.Get(ctx, taskID)
+	if err != nil || !found {
+		return err
+	}
+	issue, err := issuesSvc.GetIssue(ctx, link.IssueID)
+	if err != nil {
+		return err
+	}
+	var statusID int
+	for _, item := range mapping.StatusesFor(issue.TrackerID, task.WorkflowID) {
+		if item.WorkflowStepID != toWorkflowStepID {
+			continue
+		}
+		if statusID != 0 && statusID != item.RedmineStatusID {
+			return fmt.Errorf("sync: this workflow step maps to multiple Redmine statuses; automatic write-back is ambiguous")
+		}
+		statusID = item.RedmineStatusID
+	}
+	if statusID == 0 {
+		return nil
+	}
+	return s.writeStatus(ctx, taskID, link.IssueID, issue.StatusID, statusID, issuesSvc)
 }
 
 // ForceWriteback is the manual "Set Redmine status" action's entry point
@@ -282,10 +311,14 @@ func (s *Service) forceWriteback(ctx context.Context, taskID string, statusID in
 	if err != nil {
 		return fmt.Errorf("sync: reading issue %d before write-back: %w", link.IssueID, err)
 	}
-	if issue.StatusID == statusID {
+	return s.writeStatus(ctx, taskID, link.IssueID, issue.StatusID, statusID, issuesSvc)
+}
+
+func (s *Service) writeStatus(ctx context.Context, taskID string, issueID, currentStatusID, statusID int, issuesSvc *issues.Service) error {
+	if currentStatusID == statusID {
 		return nil
 	}
-	if err := issuesSvc.UpdateIssue(ctx, link.IssueID, issues.IssueWrite{StatusID: statusID}); err != nil {
+	if err := issuesSvc.UpdateIssue(ctx, issueID, issues.IssueWrite{StatusID: statusID}); err != nil {
 		return fmt.Errorf("sync: writing back status for task %s: %w", taskID, err)
 	}
 	return s.tasklink.RecordPushedStatus(ctx, taskID, statusID)

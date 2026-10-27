@@ -767,7 +767,8 @@ func TestApplyWatchPriorityMapping_RefreshesChangedWorkspacePriority(t *testing.
 }
 
 func TestOnEvent_TaskMoved_AutoWritebackEnabled_PushesStatus(t *testing.T) {
-	p, _ := newTestPlugin(t)
+	p, host := newTestPlugin(t)
+	host.tasks["task-1"] = &pluginsdk.Task{ID: "task-1", WorkspaceID: "ws-1", WorkflowStepID: "step-done"}
 
 	var pushedStatus any
 	srv := redmineFixtureServer(t, func(statusID any) { pushedStatus = statusID })

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"kandev-plugin-redmine/internal/fieldmapping"
@@ -33,6 +34,7 @@ import (
 // by construction rather than by convention.
 const metadataKeyWatchID = "redmine_watch_id"
 const metadataKeyIssueID = "redmine_issue_id"
+const metadataKeyAutomaticIntake = "automatic_intake"
 const pluginMetadataKey = "plugin:kandev-plugin-redmine"
 const maxTaskTitleRunes = 60
 
@@ -48,6 +50,8 @@ type Watch struct {
 	WorkflowID     string
 	WorkflowStepID string
 	ProjectID      int
+	RepositoryID   string
+	BaseBranch     string
 	TrackerID      *int
 	StatusID       *int
 	PriorityID     *int
@@ -63,9 +67,11 @@ type Watch struct {
 	Filters          []Filter
 	PriorityMappings map[int]string
 	// Resolved from current workspace settings on every poll, not watch state.
-	TrackerRoutes    []fieldmapping.TrackerRoute
-	MaxInflightTasks int // 0 = unlimited
-	Enabled          bool
+	TrackerRoutes        []fieldmapping.TrackerRoute
+	EntrySteps           map[string][]pluginsdk.WorkflowStep
+	UnavailableWorkflows map[string]error
+	MaxInflightTasks     int // 0 = unlimited
+	Enabled              bool
 }
 
 // Filter is a validated Redmine issue-list predicate.
@@ -221,6 +227,15 @@ func (s *Service) deleteWatchLocked(ctx context.Context, workspaceID, watchID st
 	if !found {
 		return fmt.Errorf("watch: %s does not belong to workspace %s", watchID, workspaceID)
 	}
+	entries, err := s.host.ListState(ctx, workspaceScope, workspaceID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Key, "autostart_issue.") && entry.Value["watch_id"] == watchID {
+			return fmt.Errorf("watch: an unconfirmed auto-start import requires native inspection before removing this watch")
+		}
+	}
 	tasks, err := s.watchTasks(ctx, workspaceID, watchID)
 	if err != nil {
 		return err
@@ -269,6 +284,40 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 		return nil
 	}
 
+	var failures []error
+	autoStarts := 0
+	tokenUserID := 0
+	var tokenUserErr error
+	for _, route := range w.TrackerRoutes {
+		if route.AutomaticIntake != nil {
+			tokenUserID, tokenUserErr = issuesSvc.TokenUserID(ctx)
+			if tokenUserErr != nil {
+				failures = append(failures, tokenUserErr)
+			}
+			break
+		}
+	}
+	owned, err := s.watchTasks(ctx, w.WorkspaceID, w.ID)
+	if err != nil {
+		return err
+	}
+	entries, err := s.host.ListState(ctx, workspaceScope, w.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Key, "autostart_issue.") && entry.Value["watch_id"] == w.ID {
+			failures = append(failures, fmt.Errorf("watch: %s has an unconfirmed earlier attempt (task %v); inspect it before retrying", entry.Key, entry.Value["task_id"]))
+		}
+	}
+	for _, taskID := range owned {
+		if tokenUserErr != nil {
+			continue
+		}
+		if err := s.claimIntake(ctx, w, taskID, tokenUserID, issuesSvc); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	for offset := 0; ; {
 		result, err := issuesSvc.ListIssues(ctx, issues.ListIssuesParams{ProjectID: strconv.Itoa(w.ProjectID), Filters: w.redmineFilters(), NativeFilters: w.nativeFilters(), Offset: offset, Limit: 100})
 		if err != nil {
@@ -294,13 +343,13 @@ func (s *Service) Poll(ctx context.Context, w Watch, issuesSvc *issues.Service) 
 					continue // leave unseen: retry once a slot frees up
 				}
 			}
-			if err := s.createTask(ctx, w, issue); err != nil {
-				return err
+			if err := s.createTask(ctx, w, issue, tokenUserID, issuesSvc, &autoStarts); err != nil {
+				failures = append(failures, err)
 			}
 		}
 		offset += len(result.Issues)
 		if len(result.Issues) == 0 || offset >= result.TotalCount {
-			return nil
+			return errors.Join(failures...)
 		}
 	}
 }
@@ -318,16 +367,104 @@ func (s *Service) watchExistsLocked(ctx context.Context, workspaceID, watchID st
 	return false, nil
 }
 
-func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) error {
+func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, tokenUserID int, issuesSvc *issues.Service, autoStarts *int) error {
+	if _, found, err := s.host.GetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID)); err != nil {
+		return err
+	} else if found {
+		return fmt.Errorf("watch: auto-start import of issue %d has an unconfirmed earlier attempt; inspect the native task before retrying", issue.ID)
+	}
+	if _, linked, err := s.tasklinks.TaskIDForIssue(ctx, w.WorkspaceID, issue.ID); err != nil || linked {
+		return err
+	}
+	var statuses []fieldmapping.StatusMapping
+	var intake *intakeClaim
+	routed := false
 	for _, route := range w.TrackerRoutes {
 		if route.RedmineTrackerID == issue.TrackerID {
 			w.WorkflowID, w.WorkflowStepID = route.WorkflowID, route.WorkflowStepID
+			statuses = route.Statuses
+			routed = true
+			if err := w.UnavailableWorkflows[w.WorkflowID]; err != nil {
+				return fmt.Errorf("watch: workflow %s unavailable for issue %d: %w", w.WorkflowID, issue.ID, err)
+			}
+			if route.AutomaticIntake != nil {
+				entry, err := route.IntakeEntry(w.EntrySteps[route.WorkflowID])
+				if err != nil {
+					return err
+				}
+				if tokenUserID <= 0 || issue.StatusID != route.AutomaticIntake.FromStatusID || issue.AssigneeID != tokenUserID {
+					return nil
+				}
+				current, err := issuesSvc.GetIssue(ctx, issue.ID)
+				if err != nil {
+					return err
+				}
+				if current.ProjectID != w.ProjectID || current.TrackerID != route.RedmineTrackerID || current.StatusID != route.AutomaticIntake.FromStatusID || current.AssigneeID != tokenUserID || !w.matches(*current) {
+					return nil
+				}
+				issue = *current
+				intake = &intakeClaim{State: "pending", IssueID: issue.ID, ProjectID: issue.ProjectID, TrackerID: issue.TrackerID, TokenUserID: tokenUserID, WorkflowID: route.WorkflowID, StepID: route.WorkflowStepID, ProfileID: entry.AgentProfileID, FromStatusID: route.AutomaticIntake.FromStatusID, WorkingStatusID: route.AutomaticIntake.WorkingStatusID}
+			}
 			break
 		}
 	}
+	if err := w.UnavailableWorkflows[w.WorkflowID]; err != nil {
+		return fmt.Errorf("watch: workflow %s unavailable for issue %d: %w", w.WorkflowID, issue.ID, err)
+	}
+	if step, mapped := (fieldmapping.Mapping{Statuses: statuses}).WorkflowStepForStatus(issue.StatusID); mapped {
+		w.WorkflowStepID = step
+	}
+	startAgent := false
+	entryProfileID := ""
+	for _, step := range w.EntrySteps[w.WorkflowID] {
+		if step.ID != w.WorkflowStepID && !(w.WorkflowStepID == "" && step.IsStartStep) {
+			continue
+		}
+		if !routed && !step.IsStartStep {
+			continue
+		}
+		for _, action := range step.OnEnterActionTypes {
+			startAgent = startAgent || action == "auto_start_agent"
+		}
+		entryProfileID = step.AgentProfileID
+	}
+	if startAgent {
+		if w.MaxInflightTasks <= 0 {
+			return fmt.Errorf("watch: automatic workflow starts require a positive max_inflight_tasks limit")
+		}
+		if entryProfileID == "" {
+			return fmt.Errorf("watch: automatic workflow starts require a fixed entry agent profile")
+		}
+		if *autoStarts >= w.MaxInflightTasks {
+			return nil
+		}
+		*autoStarts += 1 // Failed launches consume this poll's budget too.
+		if err := s.host.SetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID), map[string]any{"state": "creating", "issue_id": issue.ID, "watch_id": w.ID}); err != nil {
+			return err
+		}
+	}
+	var launch *pluginsdk.PluginTaskLaunchOptions
+	if startAgent {
+		launch = &pluginsdk.PluginTaskLaunchOptions{AgentProfileID: &entryProfileID}
+	}
+	var repositories []pluginsdk.PluginTaskRepository
+	if w.RepositoryID != "" {
+		repository := pluginsdk.PluginTaskRepository{RepositoryID: w.RepositoryID}
+		if w.BaseBranch != "" {
+			repository.BaseBranch = &w.BaseBranch
+		}
+		repositories = []pluginsdk.PluginTaskRepository{repository}
+	}
+	metadata := map[string]any{metadataKeyWatchID: w.ID, metadataKeyIssueID: issue.ID}
+	if intake != nil {
+		metadata[metadataKeyAutomaticIntake] = map[string]any{"token_user_id": tokenUserID, "from_status_id": intake.FromStatusID, "working_status_id": intake.WorkingStatusID, "workflow_id": intake.WorkflowID, "entry_step_id": intake.StepID, "profile_id": intake.ProfileID, "repository_id": w.RepositoryID}
+	}
 	task, err := s.host.Tasks().Create(ctx, pluginsdk.CreateTaskInput{
-		WorkspaceID: w.WorkspaceID,
-		WorkflowID:  w.WorkflowID,
+		WorkspaceID:  w.WorkspaceID,
+		WorkflowID:   w.WorkflowID,
+		StartAgent:   startAgent,
+		Launch:       launch,
+		Repositories: repositories,
 		WorkflowStepID: func() *string {
 			if w.WorkflowStepID == "" {
 				return nil
@@ -338,22 +475,48 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue) e
 		Title:       watcherTaskTitle(issue.ID, issue.Subject),
 		Description: issue.Description,
 		Priority:    w.PriorityMappings[issue.PriorityID],
-		Metadata: map[string]any{
-			metadataKeyWatchID: w.ID,
-			metadataKeyIssueID: issue.ID,
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
+		if startAgent && (status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.Unimplemented) {
+			err = errors.Join(err, s.host.DeleteState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID)))
+		}
 		return fmt.Errorf("watch: creating task for issue %d: %w", issue.ID, err)
 	}
+	retain := func(cause error) error {
+		if startAgent {
+			return fmt.Errorf("watch: auto-start task %s retained for native inspection: %w", task.ID, cause)
+		}
+		return s.compensateCreatedTask(ctx, task.ID, cause)
+	}
+	if startAgent {
+		if err := s.host.SetState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID), map[string]any{"state": "created", "issue_id": issue.ID, "task_id": task.ID, "watch_id": w.ID}); err != nil {
+			return retain(err)
+		}
+	}
 	if err := s.tasklinks.Set(ctx, task.ID, w.WorkspaceID, issue.ID, issue.URL); err != nil {
-		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+		return retain(fmt.Errorf("watch: linking task %s: %w", task.ID, err))
+	}
+	if routed {
+		if err := s.tasklinks.ObserveStatus(ctx, task.ID, issue.StatusID, issue.TrackerID, false); err != nil {
+			return retain(err)
+		}
+	}
+	if intake != nil {
+		if err := s.saveIntakeClaim(ctx, task.ID, *intake); err != nil {
+			return retain(err)
+		}
 	}
 	if err := s.recordWatchTask(ctx, w.WorkspaceID, w.ID, issue.ID, task.ID); err != nil {
-		return s.compensateCreatedTask(ctx, task.ID, fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+		return retain(fmt.Errorf("watch: recording task %s: %w", task.ID, err))
+	}
+	if startAgent {
+		return s.host.DeleteState(ctx, workspaceScope, w.WorkspaceID, autoStartKey(issue.ID))
 	}
 	return nil
 }
+
+func autoStartKey(issueID int) string { return "autostart_issue." + strconv.Itoa(issueID) }
 
 func (w Watch) redmineFilters() map[string]string {
 	filters := make(map[string]string)
@@ -456,6 +619,24 @@ func (s *Service) inflightCount(ctx context.Context, w Watch) (int, error) {
 		return 0, err
 	}
 	count := 0
+	entries, err := s.host.ListState(ctx, workspaceScope, w.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Key, "autostart_issue.") || entry.Value["watch_id"] != w.ID {
+			continue
+		}
+		indexed := false
+		for _, taskID := range tasks {
+			if taskID == entry.Value["task_id"] {
+				indexed = true
+			}
+		}
+		if !indexed {
+			count++
+		} // An unknown launch still occupies a slot.
+	}
 	for _, taskID := range tasks {
 		task, err := s.host.Tasks().Get(ctx, taskID)
 		if err != nil {
@@ -586,6 +767,8 @@ func (w Watch) toMap() map[string]any {
 		"workflow_id":        w.WorkflowID,
 		"workflow_step_id":   w.WorkflowStepID,
 		"project_id":         w.ProjectID,
+		"repository_id":      w.RepositoryID,
+		"base_branch":        w.BaseBranch,
 		"max_inflight_tasks": w.MaxInflightTasks,
 		"enabled":            w.Enabled,
 	}
@@ -622,6 +805,8 @@ func (w Watch) toMap() map[string]any {
 
 func watchFromMap(workspaceID string, m map[string]any) Watch {
 	w := Watch{WorkspaceID: workspaceID}
+	w.RepositoryID, _ = m["repository_id"].(string)
+	w.BaseBranch, _ = m["base_branch"].(string)
 	if v, ok := m["id"].(string); ok {
 		w.ID = v
 	}
