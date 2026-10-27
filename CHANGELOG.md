@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0] - 2026-10-27
+
+### Added
+
+- Opt in to ongoing Redmine status write-back per tracker/workflow while global write-back stays off.
+- Persist the independent tracker switch and reject ambiguous reverse status mappings.
+
+### Fixed
+
+- Start automatic intake at its explicit entry even when source or working statuses map to later stages.
+- Preserve internal workflow progress against the initial working-status echo.
+
 ## [0.6.1] - 2026-10-27
 
 ### Fixed
