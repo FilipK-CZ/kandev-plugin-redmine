@@ -716,6 +716,10 @@ function makeSettingsComponent(host) {
               h("div", { className: "space-y-2 border-t pt-3" },
                 h("h5", { className: "text-sm font-medium" }, "Statuses → workflow step for this tracker"),
                 h("p", { className: "text-xs text-muted-foreground" }, "Unmapped statuses leave the workflow stage unchanged. Keep communication approval steps unmapped. The status map below belongs only to this tracker and workflow."),
+                h("div", { className: "flex items-center gap-2" },
+                  h(Switch, { id: `redmine-route-writeback-${index}`, "data-testid": `redmine-route-writeback-${index}`, checked: !!route.auto_status_writeback, disabled: saving, onCheckedChange: checked => change({ auto_status_writeback: checked }) }),
+                  h(Label, { htmlFor: `redmine-route-writeback-${index}` }, "Write mapped status changes to Redmine for this tracker")),
+                h("p", { className: "text-xs text-muted-foreground" }, "When enabled, moving a linked task writes the mapped Redmine status for this tracker and workflow, even with global write-back off. Unmapped steps do not write. Global write-back still applies when enabled."),
                 (route.statuses || []).map((status, row) => {
                   const update = patch => change({ statuses: route.statuses.map((item, r) => r === row ? { ...item, ...patch } : item) });
                   return h("div", { key: row, className: "flex flex-wrap items-center gap-2" },
@@ -732,7 +736,7 @@ function makeSettingsComponent(host) {
                 h("div", { className: "flex items-center gap-2" },
                   h(Switch, { id: `redmine-route-intake-${index}`, "data-testid": `redmine-route-intake-${index}`, checked: !!route.automatic_intake, disabled: saving, onCheckedChange: checked => change({ automatic_intake: checked ? { from_status_id: 0, working_status_id: 0 } : undefined }) }),
                   h(Label, { htmlFor: `redmine-route-intake-${index}` }, "Automatically start workflow for issues assigned to the token user")),
-                h("p", { className: "text-xs text-muted-foreground" }, "Off by default. When enabled, this tracker imports only issues in the source status assigned to the API token's current user. The selected entry profile and workflow define execution permissions and subsequent steps. After launch is verified, the plugin sets only the working status, even with global write-back off. Replies still need their own approval."),
+                h("p", { className: "text-xs text-muted-foreground" }, "Off by default. Import only source-status issues assigned to the API token's current user and start at the selected entry step. After launch is verified, set the working status once. For later status updates, enable tracker write-back above. Replies retain their separate approval mode."),
                 route.automatic_intake ? h("div", { className: "grid gap-2", style: { gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 14rem), 1fr))" } },
                   ...[["from_status_id", "Source status", "from"], ["working_status_id", "Working status after launch", "working"]].map(([field, label, testID]) =>
                     h("div", { key: field },
@@ -891,7 +895,7 @@ function makeSettingsComponent(host) {
           h("div", null, h(Label, { htmlFor: "redmine-auto-writeback" }, "Automatic status write-back"), h(
             "p",
             { className: "text-muted-foreground text-xs" },
-            "Push mapped statuses for all linked tasks. For initial takeover only, leave this off and use the tracker rule in Field mapping.",
+            "Push mapped statuses for all linked tasks. Leave this off to limit ongoing updates to tracker routes with write-back enabled in Field mapping. Automatic intake has its own one-time working-status update.",
           )),
           h(Switch, {
             id: "redmine-auto-writeback",

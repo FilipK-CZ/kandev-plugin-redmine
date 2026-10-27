@@ -411,8 +411,10 @@ func (s *Service) createTask(ctx context.Context, w Watch, issue issues.Issue, t
 	if err := w.UnavailableWorkflows[w.WorkflowID]; err != nil {
 		return fmt.Errorf("watch: workflow %s unavailable for issue %d: %w", w.WorkflowID, issue.ID, err)
 	}
-	if step, mapped := (fieldmapping.Mapping{Statuses: statuses}).WorkflowStepForStatus(issue.StatusID); mapped {
-		w.WorkflowStepID = step
+	if intake == nil {
+		if step, mapped := (fieldmapping.Mapping{Statuses: statuses}).WorkflowStepForStatus(issue.StatusID); mapped {
+			w.WorkflowStepID = step
+		}
 	}
 	startAgent := false
 	entryProfileID := ""

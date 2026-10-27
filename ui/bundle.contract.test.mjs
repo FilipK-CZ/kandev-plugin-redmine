@@ -173,7 +173,7 @@ test("new proposals never replace an operator's prepared preview implicitly", as
   assert.ok(dialog.find("redmine-comment-approve"));
 });
 
-async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSection", watches = []) {
+async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSection", watches = [], trackerRoutes = []) {
   const { makeSettingsComponent } = await loadBundleTestHooks();
   const calls = [];
   let cursor = 0;
@@ -195,7 +195,7 @@ async function replySettingsForm(autoPublish, sectionName = "ReplyDraftingSectio
       if (key === "replies.settings.get") return { workflow_id: "workflow-1", step_id: "reply-step", prompt_name: "client-reply", ...(autoPublish === undefined ? {} : { auto_publish: autoPublish }) };
       if (key === "workflows.list") return { workflows: [{ id: "workflow-1", name: "Example", steps: [{ id: "reply-step", name: "Client reply" }] }, { id: "workflow-bug", name: "Bugs", steps: [{ id: "diagnosis", name: "Diagnosis" }] }] };
       if (key === "replies.settings.save") return context.body;
-      if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], live_statuses: [{ id: 1, name: "New" }, { id: 3, name: "Working" }], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
+      if (key === "fieldmapping.get") return { workflow_id: "workflow-1", statuses: [], priorities: [], tracker_routes: trackerRoutes, live_statuses: [{ id: 1, name: "New" }, { id: 3, name: "Working" }], live_priorities: [], live_trackers: [{ id: 8, name: "Defect" }] };
       if (key === "fieldmapping.save") return { saved: true };
       if (key === "watches.list") return { watches };
       if (key === "projects.list") return { selected_ids: [9], projects: [{ id: 9, name: "Customer project" }] };
@@ -319,6 +319,31 @@ test("selective workflow intake requires explicit open statuses and can be disab
   form.find("redmine-route-intake-0").props.onCheckedChange(false);
   await form.find("redmine-fieldmapping-save").props.onClick();
   assert.equal(form.calls.at(-1).context.body.tracker_routes[0].automatic_intake, undefined);
+});
+
+test("tracker write-back saves independently from intake and global settings", async () => {
+  const route = { redmine_tracker_id: 8, workflow_id: "workflow-bug", workflow_step_id: "diagnosis", statuses: [{ redmine_status_id: 3, workflow_step_id: "diagnosis" }], automatic_intake: { from_status_id: 1, working_status_id: 3 } };
+  const form = await replySettingsForm(undefined, "FieldMappingSection", [], [route]);
+  assert.equal(form.find("redmine-route-writeback-0").props.checked, false, "upgrading a legacy route must not enable writes");
+  form.find("redmine-route-writeback-0").props.onCheckedChange(true);
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes[0], { ...route, auto_status_writeback: true });
+  form.find("redmine-route-intake-0").props.onCheckedChange(false);
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  const saved = form.calls.at(-1).context.body.tracker_routes[0];
+  assert.equal(saved.auto_status_writeback, true);
+  assert.equal(saved.automatic_intake, undefined, "ongoing write-back does not depend on automatic intake");
+  assert.deepEqual(saved.statuses, route.statuses);
+  assert.equal(form.calls.some(call => call.key === "syncoptions.save" || call.key === "replies.settings.save"), false);
+});
+
+test("saved tracker write-back is restored and can be disabled without disabling intake", async () => {
+  const route = { redmine_tracker_id: 8, workflow_id: "workflow-bug", workflow_step_id: "diagnosis", statuses: [], auto_status_writeback: true, automatic_intake: { from_status_id: 1, working_status_id: 3 } };
+  const form = await replySettingsForm(undefined, "FieldMappingSection", [], [route]);
+  assert.equal(form.find("redmine-route-writeback-0").props.checked, true);
+  form.find("redmine-route-writeback-0").props.onCheckedChange(false);
+  await form.find("redmine-fieldmapping-save").props.onClick();
+  assert.deepEqual(form.calls.at(-1).context.body.tracker_routes[0], { ...route, auto_status_writeback: false });
 });
 
 test("editing watcher execution preserves its identity, filters and existing tasks", async () => {

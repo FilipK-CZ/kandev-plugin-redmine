@@ -251,13 +251,13 @@ func applyTitleAndDescriptionInbound(update *pluginsdk.UpdateTaskInput, issue is
 }
 
 // PushWriteback issues an outbound status PUT when a linked task moves to a
-// workflow step with a status mapping, provided opts.AutoStatusWriteback is
-// enabled. A no-op when the task isn't linked, the step has no mapping, the
+// workflow step with a status mapping, provided global or matching tracker write-back
+// is enabled. A no-op when the task isn't linked, the step has no mapping, the
 // option is disabled, or the mapped status already matches what was last
 // pushed (idempotent against a duplicate task.moved delivery or a
 // duplicate task.moved delivery re-observing the same, already-applied state).
 func (s *Service) PushWriteback(ctx context.Context, taskID, toWorkflowStepID string, mapping fieldmapping.Mapping, issuesSvc *issues.Service, opts Options) error {
-	if !opts.AutoStatusWriteback {
+	if !opts.AutoStatusWriteback && !mapping.HasTrackerWriteback() {
 		return nil
 	}
 	task, err := s.host.Tasks().Get(ctx, taskID)
@@ -274,6 +274,9 @@ func (s *Service) PushWriteback(ctx context.Context, taskID, toWorkflowStepID st
 	issue, err := issuesSvc.GetIssue(ctx, link.IssueID)
 	if err != nil {
 		return err
+	}
+	if !opts.AutoStatusWriteback && !mapping.TrackerWritebackEnabled(issue.TrackerID, task.WorkflowID) {
+		return nil
 	}
 	var statusID int
 	for _, item := range mapping.StatusesFor(issue.TrackerID, task.WorkflowID) {
