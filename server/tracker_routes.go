@@ -52,9 +52,16 @@ func (p *redminePlugin) validateTrackerRoutes(ctx context.Context, workspaceID s
 			for _, step := range steps {
 				validSteps[step.ID] = true
 			}
+			statusForStep := map[string]int{}
 			for _, status := range route.Statuses {
 				if status.WorkflowStepID != "" && !validSteps[status.WorkflowStepID] {
 					return fmt.Errorf("redmine: tracker status mapping step does not belong to its selected workflow")
+				}
+				if route.AutoStatusWriteback && status.WorkflowStepID != "" {
+					if previous := statusForStep[status.WorkflowStepID]; previous != 0 && previous != status.RedmineStatusID {
+						return fmt.Errorf("redmine: each workflow step must map to only one Redmine status when tracker write-back is enabled")
+					}
+					statusForStep[status.WorkflowStepID] = status.RedmineStatusID
 				}
 			}
 			if route.AutomaticIntake != nil {

@@ -271,6 +271,16 @@ Keep marketplace auto-update disabled for this fork and use this URL rather
 than the marketplace's **Update** button, which resolves the original upstream
 plugin under the same ID.
 
+## Selective status write-back
+
+In **Field mapping → Tracker → new task workflow**, enable **Write mapped status
+changes to Redmine for this tracker** for each route that should report its
+progress. With global **Automatic status write-back** off, only those
+tracker/workflow routes write their mapped native task moves to Redmine.
+Automatic intake remains a separate switch for starting the task and setting its
+initial working status. Existing routes default to write-back off; customer
+reply approval is independent. See [tracker workflows](docs/tracker-workflows.md).
+
 ## Publish a release
 
 Pull requests run `.github/workflows/ci.yml` (tidy, format, vet, and test) and

@@ -25,13 +25,39 @@ it, imports remain manual. For the default workflow, only the native start step
 may auto-start; an old status-filter watch pointing to an intermediate stage
 does not gain automatic execution after upgrade.
 
+## Ongoing status updates for selected trackers
+
+Enable **Write mapped status changes to Redmine for this tracker** on each
+tracker/workflow route that should report its progress. Leave global
+**Automatic status write-back** off to limit updates to those opted-in routes.
+On a native task move, the plugin reads the linked issue's current tracker and
+the task's current workflow/step, then writes the Redmine status mapped to that
+step. For example, map Implementation to In Progress and Review to Code review.
+These names are examples; both sides are selected from live configuration.
+
+The switch is independent of automatic intake: it covers existing and new linked
+tasks in that tracker/workflow, whether imported automatically or linked manually.
+It defaults off for existing configurations. Saving it does not replay previous
+moves or immediately change a ticket. Unmapped steps, stale move events, disabled
+integrations and other tracker/workflow routes do not write. A step must map to
+only one Redmine status when route write-back is enabled; ambiguous persisted
+maps also fail closed at runtime. Updates contain only `status_id`, not customer
+comments, assignees or other issue fields.
+
+Global write-back retains its existing meaning: when on, it enables mapped
+updates for all linked tasks, including routes whose local switch is off. Keep
+it off for selective behavior. Automatic intake still has its separate one-time
+working-status update after launch; enabling intake alone does not opt a route
+into ongoing write-back. Customer reply publication keeps its own approval mode.
+
 ## Automatic workflow intake without global write-back
 
 Enable **Automatically start workflow for issues assigned to the token user** on the
 selected tracker route. Choose a source status (for example New) and a distinct
 open working status (for example In Progress). Both choices come from live
-Redmine data. Keep global **Automatic status write-back** off when no other
-automatic status updates are wanted.
+Redmine data. This switch controls intake and one initial status update. For
+ongoing progress updates, also enable the selected route's write-back switch;
+the global switch can stay off.
 
 The rule imports only watch-matching issues of this tracker that are in the
 source status and assigned to the user returned by `/users/current.json` for
@@ -41,9 +67,11 @@ imports or publish a customer reply. The selected native workflow determines
 what happens after entry; the plugin does not assume a diagnosis-only process.
 
 Configure the route entry with a fixed native profile and explicit auto-start.
-Source and working statuses must stay unmapped or point to that entry, so the
-claim does not inadvertently select a different stage. Diagnosis-only workflows
-can use read-only profiles; implementation workflows can use their authorized
+Qualified automatic intake always uses this explicit entry, even if the source
+or working status maps to another step. For example, start at Plan while the
+working status maps to Implementation; the initial working-status echo does not
+move the task out of Plan. Subsequent native moves use the configured map.
+Diagnosis-only workflows can use read-only profiles; implementation workflows can use their authorized
 write profiles. The plugin preserves native permissions and MCP access. The
 workflow owner controls stage transitions and any required human gates.
 
@@ -109,7 +137,8 @@ and automatic exit disabled on both, and keep them unmapped from Redmine
 statuses. A human reviews the exact reply and owns the transition.
 
 Shared dev reservations, authorized deployers, schema and rollback checks,
-mail capture, test evidence and screenshots remain workflow policies. This
-feature grants no production deployment or automatic
-Redmine closure at Done. A fix-ready reply must distinguish dev acceptance from
+mail capture, test evidence and screenshots remain workflow policies. Production
+deployment needs its own authorization. Leave Done unmapped when Redmine closure
+requires manual approval; mapping it to a closed status with write-back enabled
+permits that status update on entering Done. A fix-ready reply must distinguish dev acceptance from
 production deployment and must not invent a release date.

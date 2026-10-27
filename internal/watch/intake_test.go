@@ -89,6 +89,32 @@ func TestAutomaticIntakeClaimWaitsForRealLaunchAndWritesOnlyOnce(t *testing.T) {
 	require.Equal(t, 3, link.ObservedStatusID)
 }
 
+func TestAutomaticIntakeUsesEntryDespiteLaterStatusMappings(t *testing.T) {
+	svc, host, w, issuesSvc, f := newIntakeFixture(t)
+	w.TrackerRoutes[0].AutoStatusWriteback = true
+	w.TrackerRoutes[0].Statuses = []fieldmapping.StatusMapping{
+		{RedmineStatusID: 1, WorkflowStepID: "backlog"},
+		{RedmineStatusID: 3, WorkflowStepID: "implementation"},
+	}
+	w.EntrySteps["bugs"] = append(w.EntrySteps["bugs"],
+		pluginsdk.WorkflowStep{ID: "backlog"},
+		pluginsdk.WorkflowStep{ID: "implementation", AgentProfileID: "implementer", OnEnterActionTypes: []string{"auto_start_agent"}},
+	)
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Len(t, host.creates, 1)
+	require.Equal(t, "intake", *host.creates[0].WorkflowStepID)
+	require.Equal(t, "readonly", *host.creates[0].Launch.AgentProfileID)
+	require.True(t, host.creates[0].StartAgent)
+	startedEntry(host, "RUNNING")
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.NoError(t, svc.Poll(context.Background(), w, issuesSvc))
+	require.Equal(t, 1, f.puts)
+	require.Len(t, host.creates, 1)
+	claim, _, err := host.GetState(context.Background(), "task", "task-1", intakeClaimKey)
+	require.NoError(t, err)
+	require.Equal(t, "complete", claim["state"])
+}
+
 func TestAutomaticIntakePolicyLeavesIneligibleIssuesUnseenUntilAssignment(t *testing.T) {
 	svc, host, w, issuesSvc, f := newIntakeFixture(t)
 	f.assignee = 99

@@ -28,14 +28,14 @@ func TestService_SaveAndGet_RoundTrips(t *testing.T) {
 	require.Equal(t, mapping, got)
 }
 
-func TestIntakeEntryCannotSkipDiagnosisOrUseAnUnconfiguredLaunch(t *testing.T) {
+func TestIntakeEntryRequiresAnExplicitConfiguredLaunch(t *testing.T) {
 	route := TrackerRoute{WorkflowID: "bugs", WorkflowStepID: "diagnosis", AutomaticIntake: &AutomaticIntakePolicy{FromStatusID: 1, WorkingStatusID: 3}}
 	entry := pluginsdk.WorkflowStep{ID: "diagnosis", AgentProfileID: "readonly", OnEnterActionTypes: []string{"auto_start_agent"}}
 	_, err := route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
 	require.NoError(t, err)
 	route.Statuses = []StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "implementation"}}
 	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
-	require.ErrorContains(t, err, "selected entry step")
+	require.NoError(t, err, "working status may map to a later workflow stage; intake still selects its explicit entry")
 	route.Statuses[0].WorkflowStepID = ""
 	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
 	require.NoError(t, err, "an explicitly unmapped source/working status is valid")
@@ -49,6 +49,22 @@ func TestIntakeEntryCannotSkipDiagnosisOrUseAnUnconfiguredLaunch(t *testing.T) {
 	route.AutomaticIntake.WorkingStatusID = 1
 	_, err = route.IntakeEntry([]pluginsdk.WorkflowStep{entry})
 	require.ErrorContains(t, err, "distinct")
+}
+
+func TestTrackerWritebackPolicyPersistsAndDefaultsOff(t *testing.T) {
+	svc := New(newFakeHost())
+	for _, enabled := range []bool{false, true} {
+		mapping := Mapping{TrackerRoutes: []TrackerRoute{{RedmineTrackerID: 8, WorkflowID: "bugs", WorkflowStepID: "plan", AutoStatusWriteback: enabled}}}
+		require.NoError(t, svc.Save(context.Background(), "ws-1", mapping))
+		got, found, err := svc.Get(context.Background(), "ws-1")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, mapping, got)
+		require.Equal(t, enabled, got.HasTrackerWriteback())
+		require.Equal(t, enabled, got.TrackerWritebackEnabled(8, "bugs"))
+		require.False(t, got.TrackerWritebackEnabled(9, "bugs"))
+		require.False(t, got.TrackerWritebackEnabled(8, "other-workflow"))
+	}
 }
 
 func TestGet_NoneSaved_ReturnsNotFound(t *testing.T) {

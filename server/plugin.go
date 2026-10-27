@@ -364,7 +364,7 @@ func (p *redminePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
 	if err != nil {
 		return fmt.Errorf("redmine: OnEvent task.moved: reading sync options for workspace %s: %w", link.WorkspaceID, err)
 	}
-	if !opts.AutoStatusWriteback {
+	if !opts.AutoStatusWriteback && !mapping.HasTrackerWriteback() {
 		return nil
 	}
 	enabled, err := p.connectionSvc.GetEnabled(ctx, link.WorkspaceID)

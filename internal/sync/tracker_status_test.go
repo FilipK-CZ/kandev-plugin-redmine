@@ -2,8 +2,11 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -13,6 +16,64 @@ import (
 	"kandev-plugin-redmine/internal/redmineclient"
 	"kandev-plugin-redmine/internal/tasklink"
 )
+
+func TestTrackerWritebackFollowsLiveStepsAndTracker(t *testing.T) {
+	host := newFakeHost()
+	host.task = pluginsdk.Task{WorkflowID: "bugs", WorkflowStepID: "implementation"}
+	links := tasklink.New(host)
+	require.NoError(t, links.Set(context.Background(), "task", "workspace", 42, "url"))
+	var currentStatus, currentTracker, puts atomic.Int64
+	currentStatus.Store(1)
+	currentTracker.Store(8)
+	srv := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			var body map[string]map[string]int
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Len(t, body, 1)
+			require.Len(t, body["issue"], 1)
+			currentStatus.Store(int64(body["issue"]["status_id"]))
+			puts.Add(1)
+			return
+		}
+		fmt.Fprintf(out, `{"issue":{"id":42,"tracker":{"id":%d},"status":{"id":%d}}}`, currentTracker.Load(), currentStatus.Load())
+	}))
+	defer srv.Close()
+	mapping := routedMapping()
+	mapping.TrackerRoutes[0].AutoStatusWriteback = true
+	mapping.TrackerRoutes[0].Statuses = []fieldmapping.StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "implementation"}, {RedmineStatusID: 5, WorkflowStepID: "review"}}
+	mapping.TrackerRoutes[1].Statuses = []fieldmapping.StatusMapping{{RedmineStatusID: 7, WorkflowStepID: "review"}}
+	svc := New(host, links)
+	issuesSvc := issues.New(redmineclient.New(srv.URL, "key", srv.Client()))
+	for _, tc := range []struct {
+		step         string
+		status, puts int64
+	}{{"implementation", 3, 1}, {"review", 5, 2}, {"client-reply", 5, 2}, {"implementation", 3, 3}} {
+		host.task.WorkflowStepID = tc.step
+		require.NoError(t, svc.PushWriteback(context.Background(), "task", tc.step, mapping, issuesSvc, Options{}))
+		require.Equal(t, tc.status, currentStatus.Load())
+		require.Equal(t, tc.puts, puts.Load())
+	}
+	currentTracker.Store(9)
+	host.task.WorkflowStepID = "review"
+	require.NoError(t, svc.PushWriteback(context.Background(), "task", "review", mapping, issuesSvc, Options{}))
+	require.Equal(t, int64(3), puts.Load(), "the live issue's new tracker is not opted in")
+	require.NoError(t, svc.PushWriteback(context.Background(), "task", "review", mapping, issuesSvc, Options{AutoStatusWriteback: true}))
+	require.Equal(t, int64(7), currentStatus.Load(), "global behavior still uses the live tracker's own mapping")
+	require.Equal(t, int64(4), puts.Load())
+}
+
+func TestTrackerWritebackWorkingStatusDoesNotSkipIntakeOrResetProgress(t *testing.T) {
+	mapping := routedMapping()
+	mapping.TrackerRoutes[0].AutoStatusWriteback = true
+	mapping.TrackerRoutes[0].Statuses = []fieldmapping.StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "implementation"}}
+	workingStatus := 3
+	for _, step := range []string{"plan", "review"} {
+		link := tasklink.Link{ObservedStatusID: workingStatus, ObservedTrackerID: 8, LastPushedStatusID: &workingStatus}
+		plan := buildInboundPlan("task", pluginsdk.Task{WorkflowID: "bugs", WorkflowStepID: step}, link, issues.Issue{TrackerID: 8, StatusID: workingStatus}, mapping, Options{})
+		require.Empty(t, plan.workflowStepID, "an unchanged working-status echo must not move the task to implementation")
+		require.True(t, plan.consumeStatusEcho)
+	}
+}
 
 func routedMapping() fieldmapping.Mapping {
 	return fieldmapping.Mapping{WorkflowID: "default", Statuses: []fieldmapping.StatusMapping{{RedmineStatusID: 3, WorkflowStepID: "default-working"}}, TrackerRoutes: []fieldmapping.TrackerRoute{
