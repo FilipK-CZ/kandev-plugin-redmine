@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1] - 2026-10-27
+
+### Fixed
+
+- Use the full available width for Redmine integration settings.
+- Keep tracker selectors together and give status mapping and automatic intake separate full-width sections.
+- Wrap controls on narrow screens without relying on plugin-only responsive host CSS.
+
 ## [0.4.1] - Unreleased
 
 - Check for an initialized session before recording a draft dispatch, so an unopened task does not become permanently uncertain without sending anything.

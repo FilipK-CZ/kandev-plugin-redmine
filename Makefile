@@ -3,7 +3,7 @@
 # When you rename the plugin, update BIN and VERSION to match manifest.yaml's
 # id and version (PKG_OUT is derived from them).
 BIN := bin/kandev-plugin-redmine
-VERSION := 0.6.0
+VERSION := 0.6.1
 STAGE := .build/stage
 PKG_OUT := kandev-plugin-redmine-$(VERSION).tar.gz
 
